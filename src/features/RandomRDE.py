@@ -1,134 +1,112 @@
 import jax
 import jax.numpy as jnp
+import jax.random as random
 
 from typing import Optional
 from typing import Union
 from typing import Callable
 
 from dataclasses import dataclass
-from functools import partial
 
 from ..utils.cache import Cache
 from ..utils.random import KeyGen, scale_matrices_rde, gaussian_matrices_sampler_RDE
+from ..utils.activation_dict import ACTIVATION_DICT
+from ..utils.checks import _check_non_negative_value
+from ..utils.lie_algebra import get_logsig_dimension
+from ..signatures import get_logsignatures
 
-from ..configs import DEFAULT_CONFIG_RRDE
 
 @dataclass
 class VectorFieldRDE:
-
-    logsig_dim : int
-    n_features : int
-    logsigs : jnp.ndarray
-    order : int
-    activation : Callable 
-    matrices : jnp.ndarray
-    # cache : Cache
+    n_features: int
+    order: int
+    activation: Callable
+    matrices: jnp.ndarray           # (d_logsig, n, n+1)
 
     @classmethod
     def from_random(cls,
-                    key : jax.Array,
-                    n_features : int,
-                    logsigs : jnp.ndarray,
-                    order : int,
-                    activation : Callable,
-                    stdA : float = 1.0,
-                    stdB : float = 1.0):
-
-        logsig_dim = logsigs.shape[-1]
-        matrices = gaussian_matrices_sampler_RDE(key, logsig_dim, n_features, order, stdA, stdB)
-
-        return cls(logsig_dim=logsig_dim,
-                   n_features=n_features,
-                   activation=activation,
-                   logsigs=logsigs,
-                   matrices=matrices)
+                    key: jax.Array,
+                    input_dim: int,
+                    n_features: int,
+                    order: int,
+                    activation: Callable,
+                    stdA: float = 1.0,
+                    stdB: float = 1.0):
+        
+        mats = gaussian_matrices_sampler_RDE(key, n_features, input_dim, order, stdA, stdB)
+        return cls(n_features=n_features, order=order, activation=activation, matrices=mats)
 
     @classmethod
     def from_cache(cls,
-                   key : jax.Array,
-                   cache : Cache,
-                   n_features : int,
-                   logsigs : jnp.ndarray,
-                   order : int,
-                   activation : Callable,
-                   stdA : float = 1.0,
-                   stdB : float = 1.0):
-
-        logsig_dim = logsigs.shape[-1]
-
-        matrices = cache.get('matrices')
-
-        matrices = scale_matrices_rde(matrices, 
-                                      logsig_dim, 
-                                      order,
-                                      stdA,
-                                      stdB,
-                                      cache.get('stdA'),
-                                      cache.get('stdB'),
-                                      key)
+                   key: jax.Array,
+                   cache: Cache,
+                   input_dim: int,
+                   n_features: int,
+                   order: int,
+                   activation: Callable,
+                   stdA: float = 1.0,
+                   stdB: float = 1.0):
         
-        return cls(logsig_dim=logsig_dim,
-                   n_features=n_features,
-                   activation=activation,
-                   logsigs=logsig,
-                   matrices=matrices)
-    
+        mats = cache.get('rde_matrices')  
+        mats = scale_matrices_rde(mats, input_dim, order, stdA, stdB, cache.get('stdA'), cache.get('stdB'), key)
+        return cls(n_features=n_features, order=order, activation=activation, matrices=mats)
 
 
-def log_odeint(field, logsigs, features_0):
+def log_odeint(field: VectorFieldRDE, logsigs: jnp.ndarray, features_0: jnp.ndarray) -> jnp.ndarray:
     """
-    Solve dZ_t = sum_i (A_i @ act(Z_t) + b_i) dX_t^i, with Z_0 = features_0.
-    X: (B, T, d), features_0: (B, n)
-    field.matrices: (d, n, n+1) with last col = b_i
-    """
-    A_full = field.matrices           # (d, n, n+1)
-    A = A_full[..., :-1]              # (d, n, n)
-    b = A_full[..., -1]               # (d, n)
-    act = field.activation            # capture in closure (no static arg)
+    Integrate Z_{t+1} = Z_t + (M_t @ act(Z_t) + b_t),
+    where M_t = Σ_i logsigs[t,i] * A_i,   b_t = Σ_i logsigs[t,i] * b_i.
 
-    dt = 1.0 / logsigs.shape[1]
+    Args
+    ----
+    field.matrices : (d, n, n+1)  # last col is b_i
+    field.activation : callable    # (n,) -> (n,)
+    logsigs : (B, K, d)            # bin-wise integrals (increments)
+    features_0 : (B, n)            # initial features per trajectory
+
+    Returns
+    -------
+    (B, K+1, n): full feature paths including initial point
+    """
+    A_full = field.matrices
+    A = A_full[..., :-1]  # (d, n, n)
+    b = A_full[..., -1]   # (d, n)
+    act = field.activation
 
     @jax.jit
-    def _integrate_one(A, b, z0, logsigs):
-        """
-        Single trajectory integrator.
-        A: (d,n,n), b: (d,n), z0: (n,), dx_seq: (T-1,d)
-        return: (T,n)
-        """
-        # Precompute per-step operators
-        mat_logs = jnp.einsum('td,dnm->tnm', logsigs, A)   # (T-1, n, n)
-        bias_logs = jnp.einsum('td,dn->tn',  logsigs, b)    # (T-1, n)
+    def _integrate_one(A, b, z0, logs_seq):
+        # logs_seq: (K, d)
+        Ms = jnp.einsum('kd,dnm->knm', logs_seq, A)  # (K, n, n)
+        bs = jnp.einsum('kd,dn->kn',  logs_seq, b)   # (K, n)
 
         def step(z_t, inputs):
             M_t, b_t = inputs
-            z_next = z_t + (M_t @ act(z_t) + b_t) * dt
+            z_next = z_t + (M_t @ act(z_t) + b_t)
             return z_next, z_next
 
-        _, traj = jax.lax.scan(step, z0, (mat_logs, bias_logs))     # traj: (T-1, n)
-        return jnp.concatenate([z0[None, :], traj], axis=0)
+        _, traj = jax.lax.scan(step, z0, (Ms, bs))      # (K, n)
+        return jnp.concatenate([z0[None, :], traj], 0)  # (K+1, n)
 
-    # Batch over trajectories (batch axis 0 on z0 and dx)
-    integrate_batched = jax.jit(jax.vmap(_integrate_one, in_axes=(None, None, None, 0)))
-    features = integrate_batched(A, b, features_0, dx)   # (B, T, n)
-    return features
+    batched = jax.jit(jax.vmap(_integrate_one, in_axes=(None, None, None, 0)))
+    return batched(A, b, features_0, logsigs)
 
     
-
-
-class RandomRDE(nn.Module):
-
+class RandomRDE:
     """
-    This class defines the
+    Random-feature RDE:
+      - Builds coefficient blocks once from input_dim & order
+      - Computes log-signatures per mini-batch (or once if no batching)
+      - Integrates over bin-wise logsig increments
     """
 
-    def __init__(self,  
-                 n_features : int,
-                 order : int = 4,
-                 step : int = 8,
-                 activation :  Callable = lambda x : x,
-                 config : dict = {'stdA' : 1.0, 'stdB' : 0.0, 'std0' : 1.0},
-                 cache : Optional[Cache] = None,
-                 device : torch.device = torch.device('cpu'),
+    def __init__(self,
+                 key: Union[int, jax.Array],
+                 n_features: int,
+                 order: int = 4,
+                 step: int = 8,
+                 activation: Callable = lambda x: x,
+                 config: dict = None,
+                 cache: Optional["Cache"] = None,
                  **kwargs):
 
         super(RandomRDE, self).__init__()
@@ -142,24 +120,62 @@ class RandomRDE(nn.Module):
         self.stdB = config.get('stdB', 0.0)
         self.std0 = config.get('std0', 1.0)
 
-        self.cache = cache
-        self.device = device
-
-        self.method = kwargs.get('method', 'rk4')
-        self.adjoint = kwargs.get('adjoint', False)
         self.min_length = kwargs.get('min_length', 3)
-        
+        self.normalize_logsigs = kwargs.get('normalize_logsigs', True)
+        self.cache_logsigs = kwargs.get('cache_logsigs', True)
+
+        self.cache = cache
+        self.key = KeyGen(key)
+
+        # set at build time
+        self.fields: Optional[VectorFieldRDE] = None
+        self.features_0: Optional[jnp.ndarray] = None
+
         self._validate_params()
 
+    
+    # ----------------------------- Validation methods -----------------------------
+    def _validate_input(self, X : jnp.ndarray) -> None:
+        """
+        Validates the input data. Moves it to self device
 
-    def _validate_cache(self, logsigs_dim : int, logsigs_length : int, 
-                        key : str, testing : bool = False) -> None:
+        Raises:
+            ValueError: If the input data is not a jnp.ndarray, or if the input data is not 2D or 3D.
+        """
+        if not isinstance(X, jnp.ndarray):
+            raise ValueError("Input data must be a jnp.ndarray")
+        
+        if X.ndim == 2:
+            return X[None, ...]
+        if X.ndim == 3:
+            return X
+        raise ValueError("Input data must be either 2D or 3D (batch)")
+
+
+    def _validate_params(self):
+
+        _check_non_negative_value(self.std0, 'std0')
+        _check_non_negative_value(self.stdA, 'stdA')
+        _check_non_negative_value(self.stdB, 'stdB')
+
+        if isinstance(self.activation, str):
+            if self.activation not in ACTIVATION_DICT:
+                raise ValueError(f"Activation function '{self.activation}' not recognized.")
+            self.activation = ACTIVATION_DICT[self.activation]
+
+
+    def _validate_cache(self,
+                        items : str, 
+                        logsigs_dim : int, 
+                        logsigs_length : Optional[int] = None, 
+                        testing : bool = False) -> None:
 
         if self.cache is None:
             self.cache = Cache()
             return False
-        
-        if key == 'matrices':
+
+        # Check cached matrices
+        if items == 'matrices':
 
             if not self.cache.has('rde_matrices'):
                 return False
@@ -172,246 +188,154 @@ class RandomRDE(nn.Module):
             if not self.cache.has('features_0'):
                 return False
             
+            # Check cached matrices dimensions
             matrix_input_dim, matrix_n_features, _ = self.cache.get('rde_matrices').shape
-
             if matrix_n_features != self.n_features:
                 return False
-            
             if matrix_input_dim != logsigs_dim:
                 return False
-            
-            features_0_dim = self.cache.get('features_0').shape[0]
 
+            # Check cached features_0 dimensions
+            features_0_dim = self.cache.get('features_0').shape[0]
             if features_0_dim != self.n_features:
                 return False
             
             return True
-        
-        if key == 'logsigs':
 
-            _str = 'logsigs_test' if testing else 'logsigs'
+        # Check cached logsigs 
+        if items == 'logsigs':
             
-            if not self.cache.has(_str):
+            tag = 'logsigs_test' if testing else 'logsigs'
+            if not self.cache.has(tag):
                 return False
             
-            _logsigs_length, _logsigs_dim = self.cache.get(_str).shape[1:]
+            Lc, Dc = self.cache.get(tag).shape[1:]
+            return (logsigs_dim == Dc) and (logsigs_length == Lc)
             
-            if logsigs_dim != _logsigs_dim:
-                return False
-            
-            if logsigs_length != _logsigs_length:
-                return False
-            
-            return True
-        
-    
-    def get_logsigs(self, X : Tensor) -> Tensor:
-
-        return get_logsigs(X, 
-                           self.step, 
-                           self.order, 
-                           self.min_length, 
-                           batch_size=self.batch_size, 
-                           device=self.device)
-            
-
-    def _initialize_fields(self, X, use_cache, testing : bool,
-                           logsigs : Optional[Tensor] = None) -> None:
-
-        input_dim = X.shape[-1]
-        logsigs_dim = get_logsig_dimension(self.order, input_dim)
-        logsigs_length = X.shape[1] // self.step 
-        logsigs_length += 1 if X.shape[1] % self.step >= self.min_length else 0
-
-        if logsigs is None:
-            if use_cache:
-                _valid_logsigs = self._validate_cache(logsigs_dim, 
-                                                      logsigs_length, 
-                                                      key='logsigs', 
-                                                      testing=testing)
-                if _valid_logsigs:
-                    _str = 'logsigs' if not testing else 'logsigs_test'
-                    logsigs = self.cache.get(_str)
-                else:
-                    logsigs = self.get_logsigs(X)
-            else:
-                logsigs = self.get_logsigs(X)
-
-        self.logsigs = logsigs.to(self.device)
-        
-        if use_cache:
-
-            _valid_matrices = self._validate_cache(logsigs_dim, 
-                                                   logsigs_length, 
-                                                   key='matrices')  
-            
-            _cache = self.cache if _valid_matrices else None
-            
-            self.fields = VectorFieldRDE(input_dim,
-                                         self.n_features, 
-                                         self.logsigs, 
-                                         self.order, 
-                                         self.activation, 
-                                         self.stdA, 
-                                         self.stdB, 
-                                         cache=_cache, 
-                                         device=self.device)
-            if _valid_matrices:
-                self.features_0 = self.cache.get('features_0').to(self.device) 
-            else:
-                self.features_0 = torch.normal(0.0, self.std0, size=(self.n_features,)).to(self.device)
-    
-            self._update_cache(testing)
-        
-        else:
-
-            self.fields = VectorFieldRDE(input_dim, 
-                                         self.n_features, 
-                                         self.logsigs, 
-                                         self.order, 
-                                         self.activation, 
-                                         self.stdA, 
-                                         self.stdB, 
-                                         cache=None, 
-                                         device=self.device)
-            
-            self.features_0 = torch.normal(0.0, self.std0, size=(self.n_features,)).to(self.device)
+        return False
         
 
-    def _validate_input(self, X : Tensor) -> None:
-        """
-        Validates the input data. Moves it to self device
-
-        Args:
-            X : A data array on CPU or GPU.
-
-        Raises:
-            ValueError: If the input data is not a Tensor, or if the input data is not 2D or 3D.
-        """
-        if not isinstance(X, Tensor):
-            raise ValueError("Input data must be a torch tensor")
-        
-        if len(X.shape) == 2:
-            return X.to(self.device).unsqueeze(0)
-        elif len(X.shape) == 3: 
-            return X.to(self.device)
-        else:
-            raise ValueError("Input data must be either 2D or 3D (batch)")
-
-
-    def _validate_params(self):
-
-        _check_non_negative_value(self.std0, 'std0')
-        _check_non_negative_value(self.stdA, 'stdA')
-        _check_non_negative_value(self.stdB, 'stdB')
-        _check_boolean(self.adjoint, 'adjoint')
-
-        if isinstance(self.activation, str):
-            if self.activation not in ACTIVATION_DICT:
-                raise ValueError(f"Activation function '{self.activation}' not recognized.")
-            self.activation = ACTIVATION_DICT[self.activation]
-
-
-    def _update_cache(self, testing : bool = False) -> None:
+    # ----------------------------- Cache update -----------------------------
+    def _update_cache(self, logsigs: Optional[jnp.ndarray] = None, testing: bool = False) -> None:
         """
         Updates the cache with the current state of the object.
-
-        Args:
-            cache : The cache to update.
         """
-        if testing:
-            self.cache.set('logsigs_test', self.logsigs)
-        else:
-            self.cache.set('logsigs', self.logsigs)
-
-        self.cache.set('rde_matrices', self.fields.rde_matrices)
+        self.cache.set('rde_matrices', self.fields.matrices)
         self.cache.set('stdA', self.stdA)
         self.cache.set('stdB', self.stdB)
         self.cache.set('std0', self.std0)
         self.cache.set('features_0', self.features_0)
 
+        if self.cache_logsigs and (logsigs is not None):
+            tag = 'logsigs_test' if testing else 'logsigs'
+            self.cache.set(tag, logsigs)
 
-    def _set_options(self, logsigs, return_interval=False):
+
+    # ----------------------------- Logsigs helpers -----------------------------    
+    def _initialize_logsigs(self,
+                            X: jnp.ndarray,
+                            logsigs_dim: int,
+                            logsigs_length: int,
+                            use_cache: bool,
+                            testing: bool,
+                            batch_size: Optional[int] = None) -> jnp.ndarray:
+
+        # Try cache 
+        if use_cache and self._validate_cache('logsigs', logsigs_dim, logsigs_length,testing=testing):
+            tag = 'logsigs' if not testing else 'logsigs_test'
+            return self.cache.get(tag)
+        
+        # Else compute
+        return get_logsignatures(X, self.step, self.order, self.min_length, batch_size=batch_size)
+
+
+    # ----------------------------- Field + f0 init -----------------------------
+
+    def _initialize_fields(self, input_dim : int, logsigs_dim : int, use_cache : bool) -> None:
+
+        if use_cache and self._validate_cache('matrices', logsigs_dim):  
+            
+            self.fields = VectorFieldRDE.from_cache(self.key(), 
+                                                    self.cache,
+                                                    input_dim,
+                                                    self.n_features, 
+                                                    self.order, 
+                                                    self.activation, 
+                                                    self.stdA, 
+                                                    self.stdB)
+
+            self.features_0 = self.cache.get('features_0')
+        
+
+        else:
+            self.fields = VectorFieldRDE.from_random(self.key(),
+                                                     input_dim,
+                                                     self.n_features,
+                                                     self.order,
+                                                     self.activation,
+                                                     self.stdA,
+                                                     self.stdB)
+            
+            # Sample fresh initial features from Normal(0, std0)
+            self.features_0 = self.std0 * random.normal(self.key(), 
+                                                        shape=(self.n_features,), 
+                                                        dtype=jnp.float32)
+        
+
+
+    # ----------------------------- Core feature eval -----------------------------
+
+    def _get_features(self, logsigs_batch: jnp.ndarray, return_interval: bool) -> jnp.ndarray:
         """
-        Sets the options to be passed to the relevant `odeint` function.
-
-        Args:
-            logsig (torch.Tensor): The logsignature of the path.
-            return_sequences (bool): Set True if a regression problem where we need the full sequence. This requires us
-                specifying the time grid as `torch.arange(0, T_final)` which is less memory efficient that specifying
-                the times `t = torch.Tensor([0, T_final])` along with an `step_size=1` in the options.
-            eps (float): The epsilon perturbation to make to integration points to distinguish the ends.
-
-        Returns:
-            torch.Tensor, dict: The integration times and the options dictionary.
+        Compute features for a **batch** of logsigs (B, K, d).
         """
-        length = logsigs.shape[1] 
-        if return_interval:
-            t = torch.arange(0, length, dtype=torch.float).to(self.device)
-            options = {}
-        else:
-            options = {'step_size':1}
-            t = torch.Tensor([0, length]).to(self.device)
-        return t, options
-
-    
-    # CHANGE HERE
-    def _get_features(self, 
-                      X : Tensor, 
-                      return_interval : bool = False):
         
-        t, options = self._set_options(self.logsigs, return_interval)
-
-        odeint_fn = odeint_adjoint if self.adjoint else odeint
-        features_t = odeint_fn(func=self.fields, 
-                               y0=self.features_0, 
-                               t=t, 
-                               method=self.method, 
-                               options=options).transpose(0,1)
-
-        if return_interval:
-            return features_t 
+        features = log_odeint(self.fields, logsigs_batch, self.features_0)  # (B, K+1, n)
         
-        return features_t[:, -1]
-    
+        if return_interval: 
+            return features / jnp.asarray(self.n_features, dtype=jnp.float32)
+        else:
+            return features[:, -1] / jnp.asarray(self.n_features, dtype=jnp.float32)
 
-    def get_features(self, 
-                     X : Tensor, 
-                     batch_size : Optional[int] = None,
-                     return_interval : bool = False,
-                     testing : bool = False,
-                     use_cache : bool = False):
+
+    # ----------------------------- Public API -----------------------------
+    def get_features(self,
+                     X: jnp.ndarray,
+                     batch_size: Optional[int] = None,
+                     return_interval: bool = False,
+                     testing: bool = False,
+                     use_cache: bool = False) -> jnp.ndarray:
+        """
+        X: (B, T, C)
+        returns (B, n) or (B, K+1, n) if return_interval.
+        """
+        X = self._validate_input(X)
         
-        self._validate_input(X)
+        B, T, C = X.shape
 
-        # Sizes
-        batch = X.shape[0] 
+        logsigs_dim = get_logsig_dimension(self.order, C)
+        logsigs_length = (T // self.step) + int((T % self.step) >= self.min_length)
 
-        if batch_size is None:
-            self.batch_size = batch
-        else:
-            self.batch_size = batch_size
+        # Init field & f0 given input space (=logsigs_dim)
+        self._initialize_fields(C, logsigs_dim, use_cache)
 
-        self._initialize_fields(X, use_cache, testing)
-        self.logsigs = self.logsigs / self.logsigs.max()
+        # Obtain logsigs for full X (possibly batched by batch_size)
+        logsigs = self._initialize_logsigs(X, logsigs_dim, logsigs_length, use_cache, testing, batch_size)
 
-        if self.features_0.dim() == 1:
-            self.features_0 = self.features_0.repeat(X.shape[0], 1)
+        # Optionally update cache with matrices/f0 and logsigs
+        if use_cache:
+            self._update_cache(logsigs=logsigs, testing=testing if self.cache_logsigs else False)
 
-        # Get features
-        if batch <= self.batch_size:
-            features = self._get_features(X, return_interval)
-        else:
-            features = []
-            for i in range(0, batch, batch_size):
-                X_batch = X[i:i+batch_size]
-                features_batch = self._get_features(X_batch, return_interval)
-                features.append(features_batch)
+        # If no additional batch slicing is required, evaluate once
+        if batch_size is None or B <= batch_size:
+            return self._get_features(logsigs, return_interval)
 
-            features = torch.cat(features, dim=0)
+        # Else slice **logsigs** in sync with X's batch chunks
+        outs = []
+        for i in range(0, B, batch_size):
+            outs.append(self._get_features(logsigs[i:i+batch_size], return_interval))
+        return jnp.concatenate(outs, axis=0)
 
-        return features
-    
 
     def get_gram(self,
                  X: jnp.ndarray,
@@ -449,6 +373,7 @@ class RandomRDE(nn.Module):
             feats_Y = self.get_features(Y, 
                                         batch_size=batch_size,
                                         return_interval=return_interval,
+                                        testing = True,
                                         use_cache=use_cache)
         else:
             feats_Y = feats_X
@@ -464,3 +389,4 @@ class RandomRDE(nn.Module):
             gram = jnp.einsum("bxf,gyf->bgxy", feats_X, feats_Y)
 
         return gram
+    

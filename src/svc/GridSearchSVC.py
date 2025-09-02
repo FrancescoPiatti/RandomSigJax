@@ -184,14 +184,6 @@ class GridSearchSVC:
                 raise ValueError("X must be a 2D or 3D tensor")
 
         return X, y
-    
-
-    @staticmethod
-    def _dimension_from_logsig(input_dim, n_fourier_features, order):
-        if not isinstance(n_fourier_features, int): 
-            return get_logsig_dimension(order, input_dim)
-        else:
-            return get_logsig_dimension(order, n_fourier_features)
 
 
     def _get_feature_extractor(self, 
@@ -279,10 +271,19 @@ class GridSearchSVC:
                                                         step=step)
 
                 # Get the features
-                X_feat = extractor.get_features(X, 
-                                                batch_size=self.batch_size,
-                                                return_interval=False,
-                                                use_cache=True)
+                if self.linear_svc:
+                    svc_input = extractor.get_features(X, 
+                                                       batch_size=self.batch_size,
+                                                       return_interval=False,
+                                                       use_cache=True)
+                else:
+                    svc_input = extractor.get_gram(X, 
+                                                   batch_size=self.batch_size,
+                                                   return_interval=False,
+                                                   use_cache=True)
+                    
+                print(svc_input)
+
             except Exception as e:
                 warnings.warn(f"Failed to get features for extractor_params={extractor_params}: {e}")
 
@@ -290,18 +291,19 @@ class GridSearchSVC:
                            'normalize_feat': None, 'train_score': None}
                 
                 records.append(_params)
+
+                print('aaa')
                 continue
 
 
             for normalize_feat in self.normalize_feat_list:
 
                 if normalize_feat:
-                    X_feat = X_feat / (X_feat.norm(dim=1, keepdim=True) + EPS_)
-
-                if not self.linear_svc:
-                    svc_input = X_feat @ X_feat.T
-                else:
-                    svc_input = X_feat
+                    if self.linear_svc:   
+                        svc_input = svc_input / (jnp.linalg.norm(svc_input, axis=1, keepdims=True) + EPS_)
+                    else:
+                        _diag = jnp.sqrt(jnp.diag(svc_input) + EPS_)
+                        svc_input = svc_input / (_diag[:, None] * _diag[None, :])
 
                 # Fit grid search
                 svc = self._get_svc()
@@ -321,6 +323,8 @@ class GridSearchSVC:
 
         # Create DataFrame from records
         df = pd.DataFrame(records)
+
+        print(df)
 
         # Get the best model based on validation score
         best_model_idx = df['train_score'].idxmax()
@@ -361,21 +365,20 @@ class GridSearchSVC:
                                                     cache=self.cache)
 
 
-                    _X = rff_cls.get_features(X, use_cache=True)
+                    X_rff = rff_cls.get_features(X, use_cache=True)
 
                 else:
-                    _X = X
+                    X_rff = X
                     n_fourier_feat = 'None'
                     bandwidth = 'None'
 
-                _X = _X / _X.max()
+                X_rff = X_rff / X_rff.max()
 
                 for order in self.orders_list:
 
                     if self.type == 'rde':
-                        _dim_logsigs = self._dimension_from_logsig(X.shape[-1],
-                                                                   n_fourier_feat,
-                                                                   order)
+                        _dim_logsigs = get_logsig_dimension(order, X_rff.shape[-1])
+                        
                         if _dim_logsigs > self.max_dim_logsigs:
                             continue
 
@@ -388,7 +391,7 @@ class GridSearchSVC:
                                           'order': order,
                                           'step': step}
 
-                            df, best = self.evaluate_extractor_svc(_X, y, sig_params)
+                            df, best = self.evaluate_extractor_svc(X_rff, y, sig_params)
 
                             all_dfs.append(df)
                             best_models.append(best)
@@ -452,15 +455,15 @@ class GridSearchSVC:
                                                 bandwidth=bandwidth,
                                                 cache=self.cache)
                 
-                _X = rff_cls.get_features(X_transformed, use_cache=True)
-                _X_test = rff_cls.get_features(X_test_transformed, use_cache=True)
+                X_rff = rff_cls.get_features(X_transformed, use_cache=True)
+                X_rff_test = rff_cls.get_features(X_test_transformed, use_cache=True)
 
             else:
-                _X = X_transformed
-                _X_test = X_test_transformed
+                X_rff = X_transformed
+                X_rff_test = X_test_transformed
 
-            _X = _X / _X.max()
-            _X_test = _X_test / _X.max()
+            X_rff = X_rff / X_rff.max()
+            X_rff_test = X_rff_test / X_rff.max()
 
             # Apply the feature extractor
             extractor = self._get_feature_extractor(n_features, 
@@ -468,18 +471,18 @@ class GridSearchSVC:
                                                     order=order,
                                                     step=step)
 
-            X_feat_train = extractor.get_features(_X,
+            X_feat_train = extractor.get_features(X_rff,
                                                   batch_size=self.batch_size,
                                                   return_interval=False,
                                                   use_cache=True)
-            X_feat_test = extractor.get_features(_X_test,
+            X_feat_test = extractor.get_features(X_rff_test,
                                                  batch_size=self.batch_size,
                                                  return_interval=False,
                                                  use_cache=True)
 
             if normalize_feat:
-                X_feat_train = X_feat_train / (X_feat_train.norm(dim=1, keepdim=True) + EPS_)
-                X_feat_test = X_feat_test / (X_feat_test.norm(dim=1, keepdim=True) + EPS_)
+                X_feat_train = X_feat_train / (jnp.linalg.norm(X_feat_train, axis=1, keepdims=True) + EPS_)
+                X_feat_test = X_feat_test / (jnp.linalg.norm(X_feat_test, axis=1, keepdims=True) + EPS_)
 
             if not self.linear_svc:
                 svc_input_train = X_feat_train @ X_feat_train.T

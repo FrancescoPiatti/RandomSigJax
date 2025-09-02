@@ -7,13 +7,11 @@ from typing import Union
 from typing import Callable
 
 from dataclasses import dataclass
-from functools import partial
 
 from ..utils.checks import _check_positive_integer_value, _check_non_negative_value
 from ..utils.random import KeyGen, gaussian_matrices_sampler_CDE, scale_matrices_cde
 from ..utils.activation_dict import ACTIVATION_DICT
 from ..utils.cache import Cache
-
 
 from ..configs import DEFAULT_CONFIG_RCDE
 
@@ -208,10 +206,10 @@ class RandomCDE:
         Validates the input data. Moves it to self device
 
         Raises:
-            ValueError: If the input data is not a Tensor, or if the input data is not 2D or 3D.
+            ValueError: If the input data is not a jnp.ndarray, or if the input data is not 2D or 3D.
         """
         if not isinstance(X, jnp.ndarray):
-            raise ValueError("Input data must be a torch tensor")
+            raise ValueError("Input data must be a jnp.ndarray")
         
         if len(X.shape) == 2:
             return X[None, ...]
@@ -396,21 +394,21 @@ class RandomCDE:
         X = self._validate_input(X)
 
         # Sizes
-        N = X.shape[0]
+        batch = X.shape[0]
         input_dim = X.shape[2]
 
         # Initialize the CDE vector field and initial features
         self._initialize_fields(input_dim, use_cache)
 
         if batch_size is None:
-            batch_size = N 
+            batch_size = batch 
 
         # Integrate in one shot or in minibatches
-        if N <= batch_size:
+        if batch <= batch_size:
             features = self._get_features(X, return_interval)
         else:
             chunks = []
-            for i in range(0, N, batch_size):
+            for i in range(0, batch, batch_size):
                 X_chunk = X[i : i + batch_size]
                 chunks.append(self._get_features(X_chunk, return_interval))
 

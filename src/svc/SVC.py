@@ -3,6 +3,7 @@ import jax.numpy as jnp
 
 try:
     from cuml.svm import SVC as SVConGPU
+    cuml_available = True
 except:
     cuml_available = False
 

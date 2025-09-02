@@ -1,12 +1,13 @@
 import jax
 import jax.numpy as jnp
+import jax.random as random
 import argparse
 
-from src_torch.svc.LinearSVC import LinearSVC
+from src.svc.LinearSVC import LinearSVC
 
 key = jax.random.PRNGKey(0)
-X = jnp.random.randn(key, (200, 10))
-y = jnp.random.randint(key, (200,), 0, 2)
+X = random.normal(key, (200, 10))
+y = random.randint(key, (200,), 0, 2)
 
 
 svc_grid = {

@@ -1,12 +1,12 @@
 import jax
 import jax.numpy as jnp
-import jax.image as jimg
 
 from typing import Optional
 from functools import partial
 
+from sklearn.base import BaseEstimator, TransformerMixin
 
-class PreprocessorJAX:
+class Preprocessor(BaseEstimator, TransformerMixin):
     """
     Initializes the `SequenceAugmentor` object.
 
@@ -42,6 +42,8 @@ class PreprocessorJAX:
         if self.normalize:
             self.scale_ = jnp.max(X_seq)
 
+        return self
+
 
     def transform(self, X_seq: jnp.ndarray) -> jnp.ndarray:
         """
@@ -63,7 +65,7 @@ class PreprocessorJAX:
         )
 
 
-@partial(jax.jit, static_argnums=(3, 4, 5, 6, 7))
+@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
 def _transform_core(
     X_seq: jnp.ndarray,
     scale: jnp.ndarray,
@@ -105,6 +107,32 @@ def _transform_core(
 
     # Resize along time if needed (linear interpolation)
     if (max_len is not None) and (x.shape[1] > max_len):
-        x = jimg.resize(x, shape=(x.shape[0], int(max_len), x.shape[2]), method="linear", antialias=False)
-
+        x = resize_time_linear_align_corners(x, int(max_len))
     return x
+
+
+@partial(jax.jit, static_argnames=('new_T',))
+def resize_time_linear_align_corners(x: jnp.ndarray, new_T: int) -> jnp.ndarray:
+    """
+    1D linear resample along time with align_corners=True semantics.
+    x: (B, T, C) -> out: (B, new_T, C)
+    """
+    B, T, C = x.shape
+    if new_T == T:
+        return x
+
+    # Endpoints-aligned grids
+    xp = jnp.linspace(0.0, T - 1.0, T, dtype=x.dtype)        # (T,)
+    xq = jnp.linspace(0.0, T - 1.0, new_T, dtype=x.dtype)     # (new_T,)
+
+    # Flatten over batch & channel -> (B*C, T)
+    xc = x.transpose(0, 2, 1).reshape(B * C, T)
+
+    # Vectorized 1D interpolation for each (B*C) series
+    def interp_1d(y):
+        return jnp.interp(xq, xp, y)                          # (new_T,)
+
+    yq = jax.vmap(interp_1d, in_axes=0, out_axes=0)(xc)       # (B*C, new_T)
+
+    # Restore shape -> (B, new_T, C)
+    return yq.reshape(B, C, new_T).transpose(0, 2, 1)

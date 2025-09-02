@@ -3,6 +3,7 @@ import jax.numpy as jnp
 
 try:
     from cuml.svm import LinearSVC as LinearSVConGPU
+    cuml_available = True
 except:
     cuml_available = False
 
@@ -24,11 +25,8 @@ class LinearSVC:
                  penalty : str = 'l2',
                  C : float = 1.0,
                  max_iter : int = 1000,
-                 intercept_scaling : float = 1.0,
-                 tol :  Optional[float] = None,
                  fit_intercept : bool = True,
-                 dual : Optional[float] = None,
-                 random_state: int = None):
+                 **kwargs):
 
         if gpu and any(d.platform == "gpu" for d in jax.devices()) and cuml_available:
             # Use GPU if available and cuml is installed
@@ -44,21 +42,21 @@ class LinearSVC:
             self.hparams['C'] = C   
         if max_iter is not None:
             self.hparams['max_iter'] = max_iter
-        if intercept_scaling is not None:
-            self.hparams['intercept_scaling'] = intercept_scaling
-        if tol is not None:
-            self.hparams['tol'] = tol
         if fit_intercept is not None:
-            self.hparams['fit_intercept'] = fit_intercept
-        if dual is not None:
-            self.hparams['dual'] = dual
-        if random_state is not None:
-            self.hparams['random_state'] = random_state
+            self.hparams['intercept_scaling'] = fit_intercept
             
         # Initialize the model
         if self.gpu:
+            
+            self.hparams['tol'] = kwargs.get('tol', None)
             self.model = LinearSVConGPU(**self.hparams)
+
         else:
+
+            self.hparams['tol'] = kwargs.get('tol', 1e-4)
+            self.hparams['intercept_scaling'] = kwargs.get('intercept_scaling', 1.0)
+            self.hparams['dual'] = kwargs.get('dual', 'auto')
+
             self.model = LinearSVConCPU(**self.hparams)
 
     # ----------------------------- Validation methods ----------------------------- 

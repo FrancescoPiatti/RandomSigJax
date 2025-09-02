@@ -247,6 +247,8 @@ def scale_matrices_cde(
     )
 
 
+
+
 def scale_matrices_rde(matrices: jax.Array,
                        input_dim: int,
                        order: int,
@@ -254,70 +256,39 @@ def scale_matrices_rde(matrices: jax.Array,
                        stdB_new: float,
                        stdA_old: float,
                        stdB_old: float,
-                       key: jax.Array) -> tuple[jax.Array, jax.Array]:
+                       key: jax.Array) -> jax.Array:
     """
-    Scale coefficient matrices for Rough Differential Equation (RDE) models.
-
-    Args:
-        matrices (jnp.ndarray): Array of shape (W, batch, m+1), where W = number of Lyndon words.
-        input_dim (int): The dimension 'm' of the underlying signal.
-        order (int): Truncation level (maximum word length) for the Lyndon basis.
-        stdA_new (float): Target standard deviation for A-type coefficients.
-        stdB_new (float): Target standard deviation for B-type coefficients.
-        stdA_old (float): Original standard deviation for A-type coefficients.
-        stdB_old (float): Original standard deviation for B-type coefficients.
-        key (jax.Array): Random key for sampling.
-
-    Returns:
-        jnp.ndarray: Rescaled tensor of the same shape as input.
-
-    Raises:
-        AssertionError: If `matrices` does not have shape [..., m, m+1].
+    Scale RDE coefficient matrices. `matrices`: (W, m, m+1); last col is B.
     """
-    
-    n_rows, n_cols = matrices.shape[-2], matrices.shape[-1]
-    
-    assert n_cols == n_rows + 1, f"Invalid matrix shape {matrices.shape}. Expected [..., m, m+1]."
+    Wm, m_plus_1 = matrices.shape[-2], matrices.shape[-1]
+    assert m_plus_1 == Wm + 1, f"Invalid matrix shape {matrices.shape}. Expected [..., m, m+1]."
 
-    # Handle degenerate cases up front (not jitted; cheap control)
+    # Match your PyTorch reference: if A_old==0 and A_new==0, return unchanged (do NOT touch B).
     if stdA_old == 0.0 and stdA_new == 0.0:
-        # Only need to scale the bias potentially; A is zero and stays zero.
-        b_scaled = scale_matrices(matrices[:, :, -1], stdB_new, stdB_old, key)
-        return matrices.at[:, :, -1].set(b_scaled)
+        return matrices
 
+    # If A_old==0 and A_new!=0, resample fresh with the new stds.
     if stdA_old == 0.0 and stdA_new != 0.0:
-        return gaussian_matrices_sampler_RDE(n_rows, input_dim, order, stdA_new, stdB_new, key)
+        return gaussian_matrices_sampler_RDE(
+            key, Wm, input_dim, order, stdA_new, stdB_new
+        )
 
-    # First scale the bias
+    # 1) Scale B (last column) by stdB_new/stdB_old
     b_scaled = scale_matrices(matrices[:, :, -1], stdB_new, stdB_old, key)
     out = matrices.at[:, :, -1].set(b_scaled)
 
-    # Lyndon block sizes per length 1..L
-    words = get_lyndon_words(order, input_dim)                
-    lengths = jnp.asarray([len(level) for level in words], jnp.int32) 
+    # 2) Scale A blocks row-wise by (stdA_new/stdA_old)^(length(word))
+    words = get_lyndon_words(order, input_dim)                # list[list[list[int]]]
+    lengths_py = [len(level) for level in words]              # e.g. [count_len1, count_len2, ...]
+    # Build per-row exponents: [1]*L1 + [2]*L2 + ... -> shape (W,)
+    if sum(lengths_py) != out.shape[0]:
+        raise ValueError(f"Sum of Lyndon counts {sum(lengths_py)} != first dim {out.shape[0]}")
+    exponents = jnp.concatenate([
+        jnp.full((L,), i + 1, dtype=out.dtype) for i, L in enumerate(lengths_py)
+    ]) if lengths_py else jnp.zeros((0,), dtype=out.dtype)
 
     ratio = jnp.asarray(stdA_new / stdA_old, dtype=out.dtype)
+    scaleA = (ratio ** exponents)[:, None, None]              # (W,1,1), broadcasts over (W,m,m)
+    out = out.at[:, :, :-1].multiply(scaleA)                  # scale A only
 
-    # Rescale each block of rows corresponding to words of increasing length
-    ratio = jnp.asarray(stdA_new / stdA_old, dtype=out.dtype)
-
-    @jax.jit
-    def apply_blocks(out_in: jax.Array, lengths: jax.Array, ratio: jax.Array) -> jax.Array:
-        # carry = (array, current_row_start)
-        def body(carry, i):
-            arr, row = carry
-            blk = lengths[i]  # JAX scalar
-            def do_blk(c):
-                arr2, r = c
-                sf = ratio ** jnp.asarray(i + 1, arr2.dtype)            # (stdA_new/stdA_old)^(i+1)
-                arr2 = arr2.at[r : r + blk, :, :-1].multiply(sf)        # scale A part only 
-                return (arr2, r + blk)
-            def skip(c):
-                return c
-            return jax.lax.cond(blk > 0, do_blk, skip, (arr, row)), None
-
-        (out_final, _), _ = jax.lax.scan(body, (out_in, 0), jnp.arange(lengths.shape[0]))
-        return out_final
-
-    out = apply_blocks(out, lengths, ratio)
     return out
