@@ -48,6 +48,7 @@ class GridSearchSVC:
                  linear_svc : bool = True,
                  rff_type : str = '1D',
                  seed : int = 42,
+                 verbose : bool = False,
                  batch_size : int = 100,
                  stratified : bool = True,
                  n_splits : int = 3,
@@ -65,6 +66,7 @@ class GridSearchSVC:
         self.key = KeyGen(seed)
         self.linear_svc = linear_svc
         self.max_dim_logsigs = max_dim_logsigs
+        self.verbose = verbose  
 
         self._get_param_dicts(param_grid.copy())
 
@@ -281,8 +283,6 @@ class GridSearchSVC:
                                                    batch_size=self.batch_size,
                                                    return_interval=False,
                                                    use_cache=True)
-                    
-                print(svc_input)
 
             except Exception as e:
                 warnings.warn(f"Failed to get features for extractor_params={extractor_params}: {e}")
@@ -291,8 +291,6 @@ class GridSearchSVC:
                            'normalize_feat': None, 'train_score': None}
                 
                 records.append(_params)
-
-                print('aaa')
                 continue
 
 
@@ -324,8 +322,6 @@ class GridSearchSVC:
         # Create DataFrame from records
         df = pd.DataFrame(records)
 
-        print(df)
-
         # Get the best model based on validation score
         best_model_idx = df['train_score'].idxmax()
         best_model = df.loc[best_model_idx].to_dict() if not df.empty else {}
@@ -348,6 +344,9 @@ class GridSearchSVC:
         self.cache = Cache()
 
         for n_fourier_feat in self.n_fourier_features_list:
+
+            if self.verbose:
+                print(f'Fourier features: {n_fourier_feat}')
             
             # If n_fourier_feat is None, we skip the RFF part
             bandwidth_list = self.bandwidth_list if n_fourier_feat is not None else [None]
@@ -542,8 +541,15 @@ class GridSearchSVC:
         all_dfs = []
         best_models = []
 
+        if self.verbose:
+            print("Starting grid search...")
+            _pre_paramgrid_size = len(ParameterGrid(self.pre_param_grid))
+
         # Grid search over preprocessing parameters
-        for pre_params in ParameterGrid(self.pre_param_grid):
+        for i, pre_params in enumerate(ParameterGrid(self.pre_param_grid)):
+
+            if self.verbose:
+                print(f"Starting Preprocessing combo {i+1} out of {_pre_paramgrid_size}")
 
             # Preprocessing
             preprocessing_class = Preprocessor(**pre_params)
@@ -570,9 +576,6 @@ class GridSearchSVC:
 
         idx = df_best_models.groupby(params_to_filter, dropna=False)['train_score'].idxmax()
         df_best_models = df_best_models.loc[idx.values].reset_index(drop=True)
-
-        # print(df_all_results)
-        # print(df_best_models)
 
         if testing:
             df_best_models = self._test(X, y, X_test, y_test, df_best_models)

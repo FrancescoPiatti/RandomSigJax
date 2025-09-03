@@ -2,14 +2,19 @@
 /try.ipynb
 /rfjax
 
-.gitignore
+
 dev
 tests/results
 tests/_run_all_tests.py
+src/__pycache__/
+src/utils/__pycache__/
+src/features/__pycache__/
+src/svc/__pycache__/
+tests/__pycache__/
 
-__pycache__/
-*.py[codz]
-*$py.class
+# __pycache__/
+# *.py[codz]
+# *$py.class
 
 # C extensions
 *.so

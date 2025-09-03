@@ -38,6 +38,7 @@ def main_cde():
 
     gs = GridSearchSVC('cde',
                        param_grid=param_grid,
+                       verbose = True,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_1d')
@@ -47,6 +48,7 @@ def main_cde():
     gs = GridSearchSVC('cde',
                        rff_type='2d',
                        param_grid=param_grid,
+                       verbose=True,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_2d')
