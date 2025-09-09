@@ -4,7 +4,7 @@ import jax.random as random
 # CHECK VALUE OF EPS
 # WRITE DOCSTRINGS WELL AND FORMAT
 
-def suggest_bandwidth1(
+def suggest_bandwidth(
     X : jnp.ndarray,
     num_samples : int = 1000,
     is_static : bool = True,
