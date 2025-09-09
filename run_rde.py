@@ -139,7 +139,7 @@ if __name__ == "__main__":
         # ===============================================================================================
 
 
-        gs_ = GridSearchSVC(args.type,
+        gs_ = GridSearchSVC('rde',
                             param_grid = param_grid,
                             linear_svc = args.linsvc,
                             rff_type = rff_type,

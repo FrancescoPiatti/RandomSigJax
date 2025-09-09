@@ -43,7 +43,7 @@ class LinearSVC:
         if max_iter is not None:
             self.hparams['max_iter'] = max_iter
         if fit_intercept is not None:
-            self.hparams['intercept_scaling'] = fit_intercept
+            self.hparams['fit_intercept'] = fit_intercept
             
         # Initialize the model
         if self.gpu:
