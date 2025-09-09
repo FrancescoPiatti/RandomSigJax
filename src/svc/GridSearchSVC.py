@@ -3,10 +3,12 @@ import jax.numpy as jnp
 
 import pandas as pd
 import warnings
+import logging
 
 from typing import Optional
 from typing import Iterable
 from typing import Dict
+from typing import Union
 
 from sklearn.model_selection import ParameterGrid
 
@@ -20,7 +22,10 @@ from ..features.RandomFourierFeatures import RandomFourierFeatures
 from ..utils.random import KeyGen
 from ..utils.cache import Cache
 from ..utils.lie_algebra import get_logsig_dimension
+from ..utils.logger import Logger
 from ..preprocessing import Preprocessor
+
+from ..utils.hyperparams import suggest_bandwidth
 
 from ..configs import DEFAULT_CDE_GS
 from ..configs import DEFAULT_RDE_GS
@@ -48,7 +53,7 @@ class GridSearchSVC:
                  linear_svc : bool = True,
                  rff_type : str = '1D',
                  seed : int = 42,
-                 verbose : bool = False,
+                 verbose : Union[bool, Logger] = False,
                  batch_size : int = 100,
                  stratified : bool = True,
                  n_splits : int = 3,
@@ -66,7 +71,13 @@ class GridSearchSVC:
         self.key = KeyGen(seed)
         self.linear_svc = linear_svc
         self.max_dim_logsigs = max_dim_logsigs
-        self.verbose = verbose  
+
+        if isinstance(verbose, Logger):
+            self.verbose = 'logger'
+            self.logger = verbose
+        else:
+            self.verbose = verbose
+            self.logger = None
 
         self._get_param_dicts(param_grid.copy())
 
@@ -236,6 +247,15 @@ class GridSearchSVC:
                 yield params
 
 
+    def _verbose_helper(self, msg: str, level: int = logging.INFO):
+        if self.verbose is False:
+            return
+        elif self.verbose is True:
+            print(msg)
+        elif self.verbose == "logger":
+            self.logger.log(msg, level=level) 
+
+
     # ==============================================================================
     # Fit methods
     # ============================================================================== 
@@ -323,8 +343,11 @@ class GridSearchSVC:
         df = pd.DataFrame(records)
 
         # Get the best model based on validation score
-        best_model_idx = df['train_score'].idxmax()
-        best_model = df.loc[best_model_idx].to_dict() if not df.empty else {}
+        if df.empty or all(df.train_score.isna()):
+            best_model = {}
+        else:
+            best_model_idx = df['train_score'].idxmax()
+            best_model = df.loc[best_model_idx].to_dict() 
         
         return df, best_model
 
@@ -345,8 +368,7 @@ class GridSearchSVC:
 
         for n_fourier_feat in self.n_fourier_features_list:
 
-            if self.verbose:
-                print(f'Fourier features: {n_fourier_feat}')
+            self._verbose_helper(f"N_fourier_features = {n_fourier_feat}")
             
             # If n_fourier_feat is None, we skip the RFF part
             bandwidth_list = self.bandwidth_list if n_fourier_feat is not None else [None]
@@ -541,19 +563,22 @@ class GridSearchSVC:
         all_dfs = []
         best_models = []
 
-        if self.verbose:
-            print("Starting grid search...")
-            _pre_paramgrid_size = len(ParameterGrid(self.pre_param_grid))
+        self._verbose_helper("Starting grid search...")
+        _pre_paramgrid_size = len(ParameterGrid(self.pre_param_grid))
 
         # Grid search over preprocessing parameters
         for i, pre_params in enumerate(ParameterGrid(self.pre_param_grid)):
 
-            if self.verbose:
-                print(f"Starting Preprocessing combo {i+1} out of {_pre_paramgrid_size}")
+            self._verbose_helper(f"Starting Preprocessing combo {i+1} out of {_pre_paramgrid_size}")
 
             # Preprocessing
             preprocessing_class = Preprocessor(**pre_params)
             X_transformed = preprocessing_class.fit_transform(X)
+
+            # Update bandwidth - TO BE CHANGED
+            suggested_bandwidth = suggest_bandwidth(X_transformed)
+            _bandwidth_list = [suggested_bandwidth * br for br in self.bandwidth_list]
+            self.bandwidth_list = _bandwidth_list + [1.0, 1.25, 0.75]
 
             # Fit model
             df_all_results, df_best_models = self._fit(X_transformed, y)

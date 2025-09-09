@@ -1,13 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-try:
-    from cuml.svm import SVC as SVConGPU
-    cuml_available = True
-except:
-    cuml_available = False
-
-from sklearn.svm import SVC as SVConCPU
+from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import KFold
@@ -29,14 +23,8 @@ class SVC:
                  tol :  Optional[float] = None,
                  dual : Optional[float] = None,
                  random_state: int = None):
-        
 
-        if gpu and any(d.platform == "gpu" for d in jax.devices()) and cuml_available:
-            # Use GPU if available and cuml is installed
-            self.gpu = True
-        else:
-            self.gpu = False
-
+        # ON GPU CUML DOES NOT SUPPORT PRECOMPUTED KERNELS
 
         self.hparams = {}
 
@@ -56,12 +44,9 @@ class SVC:
             self.hparams['random_state'] = random_state
 
         self.hparams['kernel'] = 'precomputed'  # Set kernel to precomputed for SVC
-            
-        # Initialize the model    
-        if self.gpu:
-            self.model = SVConGPU(**self.hparams)
-        else:
-            self.model = SVConCPU(**self.hparams)
+
+        # Initialize the model
+        self.model = SVC(**self.hparams)
 
     # ----------------------------- Validation methods ----------------------------- 
     

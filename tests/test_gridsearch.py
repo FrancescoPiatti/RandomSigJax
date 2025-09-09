@@ -3,13 +3,16 @@ import argparse
 from src.utils.load_ucr_uea_datasets import load_dataset
 from src.svc.GridSearchSVC import GridSearchSVC
 
+from src.utils.logger import Logger
 import warnings 
 warnings.filterwarnings("ignore")
 
 
+logger = Logger('tests/results/log1.log')
+
 def main_cde():
 
-    print("Loading dataset ...")
+    logger.log("Loading dataset ...")
     X_tr, y_tr, X_te, y_te = load_dataset("Libras")
 
     X_tr = X_tr[::2]
@@ -38,36 +41,37 @@ def main_cde():
 
     gs = GridSearchSVC('cde',
                        param_grid=param_grid,
-                       verbose = True,
+                       verbose=logger,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_1d')
 
-    print('Done')
+    logger.log('Done')
 
     gs = GridSearchSVC('cde',
                        rff_type='2d',
                        param_grid=param_grid,
-                       verbose=True,
+                       verbose=logger,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_2d')
 
-    print('Done')
+    logger.log('Done')
 
     gs = GridSearchSVC('cde',
                        linear_svc=False,
                        param_grid=param_grid,
+                       verbose=logger,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_ker_1d')
 
-    print('Done')
+    logger.log('Done')
 
 
 def main_rde():
 
-    print("Loading dataset ...")
+    logger.log("Loading dataset ...")
     X_tr, y_tr, X_te, y_te = load_dataset("Libras")
 
     X_tr = X_tr[::2]
@@ -97,20 +101,22 @@ def main_rde():
 
     gs = GridSearchSVC('rde',
                        param_grid=param_grid,
+                       verbose=logger,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_1d')
 
-    print('Done')
+    logger.log('Done')
 
     gs = GridSearchSVC('rde',
                        linear_svc=False,
                        param_grid=param_grid,
+                       verbose=logger,
                        batch_size=100)
     
     gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_ker_1d')
 
-    print('Done')
+    logger.log('Done')
 
 
 if __name__ == "__main__":

@@ -38,8 +38,8 @@ def load_dataset(name : str, to_jax : bool = True) -> Tuple[jnp.ndarray]:
 
     if to_jax:
         X_train = jnp.array(X_train, dtype=jnp.float32)
-        y_train = jnp.array(y_train, dtype=jnp.int64)
+        y_train = jnp.array(y_train, dtype=jnp.int32)
         X_test = jnp.array(X_test, dtype=jnp.float32)
-        y_test = jnp.array(y_test, dtype=jnp.int64)
+        y_test = jnp.array(y_test, dtype=jnp.int32)
 
     return X_train, y_train, X_test, y_test

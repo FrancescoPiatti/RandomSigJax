@@ -52,21 +52,23 @@ class VectorFieldRDE:
         return cls(n_features=n_features, order=order, activation=activation, matrices=mats)
 
 
-def log_odeint(field: VectorFieldRDE, logsigs: jnp.ndarray, features_0: jnp.ndarray) -> jnp.ndarray:
+def log_odeint(field, logsigs: jnp.ndarray, features_0: jnp.ndarray, return_interval: bool = True) -> jnp.ndarray:
     """
     Integrate Z_{t+1} = Z_t + (M_t @ act(Z_t) + b_t),
     where M_t = Σ_i logsigs[t,i] * A_i,   b_t = Σ_i logsigs[t,i] * b_i.
 
     Args
     ----
-    field.matrices : (d, n, n+1)  # last col is b_i
-    field.activation : callable    # (n,) -> (n,)
-    logsigs : (B, K, d)            # bin-wise integrals (increments)
-    features_0 : (B, n)            # initial features per trajectory
+    field.matrices : (d, n, n+1)   # last col is b_i
+    field.activation : callable     # (n,) -> (n,)
+    logsigs : (B, K, d)             # bin-wise integrals (increments)
+    features_0 : (B, n)             # initial features per trajectory
+    return_interval : bool          # if True -> (B, K+1, n) full path; else -> (B, n) final only
 
     Returns
     -------
-    (B, K+1, n): full feature paths including initial point
+    jnp.ndarray
+        (B, K+1, n) if return_interval=True, else (B, n).
     """
     A_full = field.matrices
     A = A_full[..., :-1]  # (d, n, n)
@@ -74,8 +76,9 @@ def log_odeint(field: VectorFieldRDE, logsigs: jnp.ndarray, features_0: jnp.ndar
     act = field.activation
 
     @jax.jit
-    def _integrate_one(A, b, z0, logs_seq):
-        # logs_seq: (K, d)
+    def _integrate_one_full(A, b, z0, logs_seq):
+        """Single trajectory, returns full path (K+1, n)."""
+        # Precompute per-step operators (materializes K blocks)
         Ms = jnp.einsum('kd,dnm->knm', logs_seq, A)  # (K, n, n)
         bs = jnp.einsum('kd,dn->kn',  logs_seq, b)   # (K, n)
 
@@ -84,11 +87,27 @@ def log_odeint(field: VectorFieldRDE, logsigs: jnp.ndarray, features_0: jnp.ndar
             z_next = z_t + (M_t @ act(z_t) + b_t)
             return z_next, z_next
 
-        _, traj = jax.lax.scan(step, z0, (Ms, bs))      # (K, n)
-        return jnp.concatenate([z0[None, :], traj], 0)  # (K+1, n)
+        _, traj = jax.lax.scan(step, z0, (Ms, bs))       # (K, n)
+        return jnp.concatenate([z0[None, :], traj], 0)   # (K+1, n)
 
-    batched = jax.jit(jax.vmap(_integrate_one, in_axes=(None, None, None, 0)))
-    return batched(A, b, features_0, logsigs)
+    @jax.jit
+    def _integrate_one_final(A, b, z0, logs_seq):
+        """Single trajectory, returns only final state (n,). Memory-saving."""
+        def step(z_t, x_t):  # x_t: (d,)
+            M_t = jnp.einsum('d,dnm->nm', x_t, A)  # (n, n)
+            b_t = jnp.einsum('d,dn->n',  x_t, b)   # (n,)
+            z_next = z_t + (M_t @ act(z_t) + b_t)
+            return z_next, None
+
+        zT, _ = jax.lax.scan(step, z0, logs_seq)
+        return zT  # (n,)
+
+    if return_interval:
+        batched = jax.jit(jax.vmap(_integrate_one_full, in_axes=(None, None, None, 0)))
+        return batched(A, b, features_0, logsigs)   # (B, K+1, n)
+    else:
+        batched = jax.jit(jax.vmap(_integrate_one_final, in_axes=(None, None, None, 0)))
+        return batched(A, b, features_0, logsigs)   # (B, n)
 
     
 class RandomRDE:
@@ -290,12 +309,9 @@ class RandomRDE:
         Compute features for a **batch** of logsigs (B, K, d).
         """
         
-        features = log_odeint(self.fields, logsigs_batch, self.features_0)  # (B, K+1, n)
-        
-        if return_interval: 
-            return features / jnp.asarray(self.n_features, dtype=jnp.float32)
-        else:
-            return features[:, -1] / jnp.asarray(self.n_features, dtype=jnp.float32)
+        features = log_odeint(self.fields, logsigs_batch, self.features_0, return_interval=return_interval)  # (B, K+1, n)
+
+        return features / jnp.sqrt(jnp.asarray(self.n_features, dtype=jnp.float32))
 
 
     # ----------------------------- Public API -----------------------------

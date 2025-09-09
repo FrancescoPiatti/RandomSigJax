@@ -128,11 +128,16 @@ class VectorFieldCDE:
 
 #     return features
 
-def cdeint(field, X, features_0):
+def cdeint(field, X, features_0, return_interval: bool = True):
     """
     Solve dZ_t = sum_i (A_i @ act(Z_t) + b_i) dX_t^i, with Z_0 = features_0.
     X: (B, T, d), features_0: (B, n)
     field.matrices: (d, n, n+1) with last col = b_i
+
+    If return_interval:
+        returns (B, T, n) full trajectory.
+    Else:
+        returns (B, n) final state only (memory-saving path).
     """
     A_full = field.matrices           # (d, n, n+1)
     A = A_full[..., :-1]              # (d, n, n)
@@ -141,27 +146,44 @@ def cdeint(field, X, features_0):
     dx = jnp.diff(X, axis=1)          # (B, T-1, d)
 
     @jax.jit
-    def _integrate_one(A, b, z0, dx_seq):
+    def _integrate_one_full(A, b, z0, dx_seq):
         """
-        Single trajectory integrator.
-        A: (d,n,n), b: (d,n), z0: (n,), dx_seq: (T-1,d)
-        return: (T,n)
+        Single trajectory, returns full path (T, n).
         """
         # Precompute per-step operators
-        mat_dx = jnp.einsum('td,dnm->tnm', dx_seq, A)   # (T-1, n, n)
-        bias_dx = jnp.einsum('td,dn->tn',  dx_seq, b)    # (T-1, n)
+        mat_dx = jnp.einsum('td,dnm->tnm', dx_seq, A)  # (T-1, n, n)
+        bias_dx = jnp.einsum('td,dn->tn',  dx_seq, b)  # (T-1, n)
 
         def step(z_t, inputs):
             M_t, b_t = inputs
             z_next = z_t + M_t @ act(z_t) + b_t
             return z_next, z_next
 
-        _, traj = jax.lax.scan(step, z0, (mat_dx, bias_dx))     # traj: (T-1, n)
-        return jnp.concatenate([z0[None, :], traj], axis=0)
+        _, traj = jax.lax.scan(step, z0, (mat_dx, bias_dx))   # traj: (T-1, n)
+        return jnp.concatenate([z0[None, :], traj], axis=0)   # (T, n)
 
-    # Batch over trajectories (batch axis 0 on z0 and dx)
-    integrate_batched = jax.jit(jax.vmap(_integrate_one, in_axes=(None, None, None, 0)))
-    features = integrate_batched(A, b, features_0, dx)   # (B, T, n)
+    @jax.jit
+    def _integrate_one_final(A, b, z0, dx_seq):
+        """
+        Single trajectory, returns only final state (n,).
+        Memory-saving: compute M_t, b_t on the fly; no per-step storage.
+        """
+        def step(z_t, x_t):  # x_t: (d,)
+            M_t = jnp.einsum('d,dnm->nm', x_t, A)  # (n, n)
+            b_t = jnp.einsum('d,dn->n',  x_t, b)   # (n,)
+            z_next = z_t + M_t @ act(z_t) + b_t
+            return z_next, None
+
+        zT, _ = jax.lax.scan(step, z0, dx_seq)
+        return zT  # (n,)
+
+    if return_interval:
+        integrate_batched = jax.jit(jax.vmap(_integrate_one_full, in_axes=(None, None, None, 0)))
+        features = integrate_batched(A, b, features_0, dx)   # (B, T, n)
+    else:
+        integrate_batched = jax.jit(jax.vmap(_integrate_one_final, in_axes=(None, None, None, 0)))
+        features = integrate_batched(A, b, features_0, dx)   # (B, n)
+
     return features
 
 
@@ -376,12 +398,9 @@ class RandomCDE:
               - Else: shape (batch, n_features), the final timepoint features.
         """
 
-        features = cdeint(field=self.fields, X=X, features_0=self.features_0)
+        features = cdeint(field=self.fields, X=X, features_0=self.features_0, return_interval=return_interval)
 
-        if return_interval: 
-            return features / jnp.asarray(self.n_features, dtype=jnp.float32)
-        else:
-            return features[:, -1] / jnp.asarray(self.n_features, dtype=jnp.float32)
+        return features / jnp.sqrt(jnp.asarray(self.n_features, dtype=jnp.float32))
 
 
     def get_features(self, 
@@ -422,7 +441,7 @@ class RandomCDE:
                  Y: Optional[jnp.ndarray] = None,
                  return_interval: bool = False,
                  batch_size: Optional[int] = None,
-                 use_cache: bool = False) -> jnp.ndarray:
+                 use_cache: bool = True) -> jnp.ndarray:
         """
         Compute the Gram (kernel) matrix between path collections X and Y
         using CDE features extracted by this object.
