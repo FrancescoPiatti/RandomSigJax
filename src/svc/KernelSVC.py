@@ -10,7 +10,7 @@ from typing import Optional
 from typing import Dict
 
 
-class SVC:
+class KernelSVC:
     """
     Wrapper for a linear SVM that uses scikit-learn on CPU and cuML on GPU.
     """
@@ -19,7 +19,7 @@ class SVC:
                  C : float = 1.0,
                  gamma : str = 'scale',
                  decision_function_shape : Optional[str] = 'ovo',
-                 max_iter : int = 10000,
+                 max_iter : int = 1000,
                  tol :  Optional[float] = None,
                  dual : Optional[float] = None,
                  random_state: int = None):
@@ -43,10 +43,11 @@ class SVC:
         if random_state is not None:
             self.hparams['random_state'] = random_state
 
-        self.hparams['kernel'] = 'precomputed'  # Set kernel to precomputed for SVC
+        # if not self.gpu:
+        #     self.hparams['kernel'] = 'precomputed'  # Set kernel to precomputed for SVC
 
         # Initialize the model
-        self.model = SVC(**self.hparams)
+        self.model = SVC(kernel='precomputed', **self.hparams)
 
     # ----------------------------- Validation methods ----------------------------- 
     

@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import pandas as pd
 import warnings
 import logging
+import time
 
 from typing import Optional
 from typing import Iterable
@@ -13,7 +14,7 @@ from typing import Union
 from sklearn.model_selection import ParameterGrid
 
 from .LinearSVC import LinearSVC
-from .SVC import SVC
+from .KernelSVC import KernelSVC
 
 from ..features.RandomCDE import RandomCDE
 from ..features.RandomRDE import RandomRDE
@@ -265,10 +266,10 @@ class GridSearchSVC:
         if self.linear_svc:
             svc = LinearSVC(gpu=self.gpu, **svc_params)
         else:
-            svc = SVC(gpu=self.gpu, **svc_params)
+            # CHANGE HERE
+            svc = KernelSVC(gpu=False, **svc_params)
 
         return svc
-
 
     def evaluate_extractor_svc(self, X : jnp.ndarray, y : jnp.ndarray, sig_params : dict):
         """
@@ -286,6 +287,9 @@ class GridSearchSVC:
         for extractor_params in self._get_extractor_params_combinations():
 
             try:
+                
+                # start_time = time.time()
+
                 # Get the feature extractor
                 extractor = self._get_feature_extractor(n_features, 
                                                         extractor_params,
@@ -303,6 +307,10 @@ class GridSearchSVC:
                                                    batch_size=self.batch_size,
                                                    return_interval=False,
                                                    use_cache=True)
+                    
+                # end_time = time.time()
+
+                # print(end_time - start_time)
 
             except Exception as e:
                 warnings.warn(f"Failed to get features for extractor_params={extractor_params}: {e}")
@@ -313,7 +321,6 @@ class GridSearchSVC:
                 records.append(_params)
                 continue
 
-
             for normalize_feat in self.normalize_feat_list:
 
                 if normalize_feat:
@@ -322,6 +329,9 @@ class GridSearchSVC:
                     else:
                         _diag = jnp.sqrt(jnp.diag(svc_input) + EPS_)
                         svc_input = svc_input / (_diag[:, None] * _diag[None, :])
+
+                
+                # start_time = time.time()
 
                 # Fit grid search
                 svc = self._get_svc()
@@ -336,6 +346,9 @@ class GridSearchSVC:
                             **svc.best_params,
                             'normalize_feat': normalize_feat,
                             'train_score': svc.best_score}
+
+                # end_time = time.time()
+                # print('svc', end_time - start_time)
 
             records.append(results_)
 
@@ -405,6 +418,8 @@ class GridSearchSVC:
 
                     for step in self.step_list:
                         for n_feat in self.n_features_list:
+
+                            self._verbose_helper(f"  Order = {order}, Bandwidth = {bandwidth}, N_features = {n_feat}")
 
                             sig_params = {'n_fourier_features': n_fourier_feat,
                                           'bandwidth': bandwidth,

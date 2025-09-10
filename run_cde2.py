@@ -12,20 +12,17 @@ import warnings
 warnings.filterwarnings("ignore")
 
 CONFIG_CDE_GS = {
-    'n_features': [250, 500, 1000],
+    'n_features': [250],
     'n_fourier_features': [None, 32, 64, 128, 256, 512, 1024],
-    'activation': ['id', 'tanh', 'sigmoid'],
-    'stdA': [0.05, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0],
-    'stdB': [0.0, 0.01, 0.1],
-    'std0': [0.0, 0.1, 0.5, 1.0, 2.0],
+    'activation': ['id', 'tanh'],
+    'stdA': [0.25, 0.5, 1.0, 1.5],
+    'stdB': [0.0, 0.1],
+    'std0': [0.0, 0.5, 1.0, 1.5],
     'normalize_feat': [False, True],
 }
 
 
 BANDWIDTH_RATIOS = [
-    0.01,
-    0.025,
-    0.05,
     0.1,
     0.25,
     0.5,
@@ -33,9 +30,6 @@ BANDWIDTH_RATIOS = [
     2.5,
     5.,
     10.,
-    25.,
-    50.,
-    100.
 ]
 
 # OK!
@@ -54,9 +48,9 @@ CONFIG_SVC_GS = {
 CONFIG_PRE_GS = {
     'add_time': True,
     'lead_lag': [False, True],
-    'basepoint': [False, True],
+    'basepoint': [True],
     'normalize': [True],
-    'max_time': [0., 1e0, 1e1, 1e2, 1e3],
+    'max_time': [1e0, 1e1, 1e2, 1e3],
     'max_len': [200],
 }
 
