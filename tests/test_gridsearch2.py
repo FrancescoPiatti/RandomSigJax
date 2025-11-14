@@ -15,58 +15,62 @@ def main_cde():
     logger.log("Loading dataset ...")
     X_tr, y_tr, X_te, y_te = load_dataset("Libras")
 
-    X_tr = X_tr[::2]
-    y_tr = y_tr[::2]
-    X_te = X_te[::2]
-    y_te = y_te[::2]
+    # X_tr = X_tr[::2]
+    # y_tr = y_tr[::2]
+    # X_te = X_te[::2]
+    # y_te = y_te[::2]
 
     # feature extraction
     param_grid = {
-        'n_features': [16, 32],
-        'n_fourier_features': [None, 4],
-        'penalty':['l1','l2'],
-        'gamma':['scale','auto'],
-        'activation': ['id', 'relu', 'tanh'],
-        'stdA': [1,0.1],
-        'stdB': [0,], 
+        'n_features': [250],
+        'n_fourier_features': [None, 64],
+        # 'penalty':['l1','l2'],
+        # 'gamma':['scale','auto'],
+        'gamma':'scale',
+        'bandwidth':[0.5,1,1.5],
+        'activation': ['id'],
+        'stdA': [0.25],
+        'stdB': [0.1], 
         'std0': 0.,
-        'C': [2,3],
+        'C': [10, 100, 1000,10000],
+        'add_time':True,
         'normalize': [True],
-        'basepoint': [False, True],
+        'basepoint': [True],
         'lead_lag': [False, True],
-        'max_time': 10,
+        'max_time': 1,
         'normalize_feat':[False, True]
     }
 
 
-    gs = GridSearchSVC('cde',
-                       param_grid=param_grid,
-                       verbose=logger,
-                       batch_size=100)
+    # gs = GridSearchSVC('cde',
+    #                    param_grid=param_grid,
+    #                    verbose=logger,
+    #                    batch_size=100)
     
-    gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_1d')
+    # gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_1d')
 
-    logger.log('Done')
+    # logger.log('Done')
 
     gs = GridSearchSVC('cde',
                        rff_type='2d',
-                       param_grid=param_grid,
-                       verbose=logger,
-                       batch_size=100)
-    
-    gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_lin_2d')
-
-    logger.log('Done')
-
-    gs = GridSearchSVC('cde',
                        linear_svc=False,
                        param_grid=param_grid,
                        verbose=logger,
                        batch_size=100)
     
-    gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_ker_1d')
+    gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft1')
 
     logger.log('Done')
+
+    # gs = GridSearchSVC('cde',
+    #                    linear_svc=False,
+    #                    param_grid=param_grid,
+    #                    verbose=logger,
+    #                    batch_size=100)
+    
+    # gs.fit(X_tr, y_tr, X_te, y_te, 'tests/results/draft_ker_1d')
+
+    # logger.log('Done')
 
 
 def main_rde():
@@ -95,7 +99,8 @@ def main_rde():
         'basepoint': [False, True],
         'lead_lag': [False, True],
         'max_time': 10,
-        'normalize_feat':[False, True]
+        'normalize_feat':[False, True],
+        'bandwidth':[0.5,1,1.5]
     }
 
 

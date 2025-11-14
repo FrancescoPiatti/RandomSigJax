@@ -4,7 +4,7 @@ import jax.numpy as jnp
 try:
     from cuml.svm import LinearSVC as LinearSVConGPU
     cuml_available = True
-except:
+except Exception:
     cuml_available = False
 
 from sklearn.svm import LinearSVC as LinearSVConCPU
@@ -28,11 +28,11 @@ class LinearSVC:
                  fit_intercept : bool = True,
                  **kwargs):
 
+        # Check GPU is available and cuml is installed
         if gpu and any(d.platform == "gpu" for d in jax.devices()) and cuml_available:
-            # Use GPU if available and cuml is installed
-            self.gpu = True
+            gpu = True
         else:
-            self.gpu = False
+            gpu = False
 
         self.hparams = {}
         
@@ -46,13 +46,11 @@ class LinearSVC:
             self.hparams['fit_intercept'] = fit_intercept
             
         # Initialize the model
-        if self.gpu:
-            
+        if gpu:
             self.hparams['tol'] = kwargs.get('tol', None)
             self.model = LinearSVConGPU(**self.hparams)
 
         else:
-
             self.hparams['tol'] = kwargs.get('tol', 1e-4)
             self.hparams['intercept_scaling'] = kwargs.get('intercept_scaling', 1.0)
             self.hparams['dual'] = kwargs.get('dual', 'auto')
@@ -96,6 +94,19 @@ class LinearSVC:
                        stratified : bool = True):
         """
         Fit the model using grid search.
+
+        Parameters
+        ----------
+        features : jnp.ndarray
+            Feature matrix of shape (n_samples, n_features).
+        y : jnp.ndarray
+            Labels of shape (n_samples,).
+        svc_grid : Dict
+            Dictionary specifying parameter grid for GridSearchCV.
+        cv : int
+            Number of cross-validation folds.
+        stratified : bool
+            Whether to use stratified K-Folds (True) or regular K-Folds (False).
         """
 
         self._validate_input_type(features, y)
@@ -121,6 +132,9 @@ class LinearSVC:
         """
         self._validate_input_type(features, y)
         return self.model.score(features, y)
+    
+
+    # ----------------------------- Properties -----------------------------
     
     @property
     def coef_(self) -> jnp.ndarray:

@@ -249,6 +249,35 @@ class RandomRDE:
             tag = 'logsigs_test' if testing else 'logsigs'
             self.cache.set(tag, logsigs)
 
+    def get_cache(self) -> Cache:
+        """
+        Returns the cache object.
+        """
+        if self.cache is None:
+            self.cache = Cache()
+        
+        return self.cache
+    
+
+    def set_cache(self, cache : Cache) -> None:
+        """
+        Sets the cache object.
+        """
+        if not isinstance(cache, Cache):
+            raise ValueError("Cache must be of type Cache")
+        self.cache = cache
+
+
+    def clear_cache(self, key : Optional[str] = None) -> None:
+        """
+        Clears the cache object.
+        """    
+        if key is None:
+            self.cache.clear()
+        else:
+            self.cache.remove(key)
+
+
 
     # ----------------------------- Logsigs helpers -----------------------------    
     def _initialize_logsigs(self,
@@ -260,7 +289,7 @@ class RandomRDE:
                             batch_size: Optional[int] = None) -> jnp.ndarray:
 
         # Try cache 
-        if use_cache and self._validate_cache('logsigs', logsigs_dim, logsigs_length,testing=testing):
+        if use_cache and self._validate_cache('logsigs', logsigs_dim, logsigs_length, testing=testing):
             tag = 'logsigs' if not testing else 'logsigs_test'
             return self.cache.get(tag)
         

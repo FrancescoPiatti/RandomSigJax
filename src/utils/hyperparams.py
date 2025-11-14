@@ -1,3 +1,5 @@
+# src/utils/hyperparams.py
+
 import jax.numpy as jnp
 import jax.random as random
 

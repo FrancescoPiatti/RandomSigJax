@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import pandas as pd
 import warnings
 import logging
-import time
 
 from typing import Optional
 from typing import Iterable
@@ -24,7 +23,7 @@ from ..utils.random import KeyGen
 from ..utils.cache import Cache
 from ..utils.lie_algebra import get_logsig_dimension
 from ..utils.logger import Logger
-from ..preprocessing import Preprocessor
+from ..utils.preprocessing import Preprocessor
 
 from ..utils.hyperparams import suggest_bandwidth
 
@@ -36,16 +35,65 @@ from ..configs import DEFAULT_PRE_GS
 
 EPS_ = 1e-10
 
+# print times for debug
+
 
 class GridSearchSVC:
     """
-    Grid search over estimator and feature-extractor hyperparameters, pure Torch CV.
+    Grid search over RandomCDE / RandomRDE feature extractors and SVC
+    hyperparameters for time-series classification.
+
+    This class wraps the full pipeline:
+    - optional preprocessing of input paths (time / lead–lag / basepoint / normalisation),
+    - optional Random Fourier Features (RFF) layer,
+    - RandomCDE or RandomRDE feature extractor,
+    - linear or kernel SVC head,
+
+    and performs cross-validated grid search over all correspondingn hyperparameters.
 
     Parameters
     ----------
-    extractor : class
-        Feature-extractor class with `get_features(X: Tensor) -> Tensor`.
-
+    type : str
+        Either 'rde' or 'cde', selecting the RandomRDE or RandomCDE feature extractor respectively.
+    param_grid : dict
+        Dictionary specifying the hyperparameter grid. It may contain
+        keys for:
+          - preprocessing (e.g. 'add_time', 'lead_lag', 'basepoint',
+            'normalize', 'max_time', 'max_len'),
+          - differential equation features (e.g. 'n_features', 'order',
+            'step', 'stdA', 'stdB', 'std0', 'activation'),
+          - random Fourier features (e.g. 'n_fourier_features', 'bandwidth'),
+          - SVC head (e.g. 'C', 'penalty' for linear SVC, or 'C',
+            'gamma' for kernel SVC).
+        Any key not provided falls back to a default grid in the
+        corresponding DEFAULT_*_GS config.
+    gpu : bool, optional
+        If True, attempt to use a GPU-backed implementation where available (for the SVC head 
+        and JAX computations). Falls back to CPU if no suitable GPU is detected.
+    linear_svc : bool, optional
+        If True, use a linear SVC head (LinearSVC wrapper). If False,
+        use a kernel SVC head (KernelSVC wrapper).
+    rff_type : {'1D', '2D'}, optional
+        Type of Random Fourier Features to use when 'n_fourier_features' > 0.
+    seed : int, optional
+        Random seed used to initialise the internal key generator for random features.
+    verbose : bool or Logger, optional
+        If False, run silently. If True, print progress messages.
+        If a Logger instance is provided, messages are routed through that logger.
+    batch_size : int, optional
+        Batch size used when computing random CDE/RDE features.
+    stratified : bool, optional
+        If True, use stratified splits in cross-validation; otherwise use standard K-fold splits.
+    n_splits : int, optional
+        Maximum number of cross-validation folds. The effective number
+        of folds is clipped to the minimum class count.
+    shuffle : bool, optional
+        Whether to shuffle data before splitting into folds.
+    max_dim_logsigs : int, optional
+        Maximum allowed log-signature dimension for RDE features.
+        Configurations that exceed this threshold are skipped.
+    random_state : int or None, optional
+        Random seed passed to the CV splitter when shuffling is enabled.
     """
     def __init__(self,
                  type,
@@ -59,7 +107,7 @@ class GridSearchSVC:
                  stratified : bool = True,
                  n_splits : int = 3,
                  shuffle : bool = False,
-                 max_dim_logsigs : int = 1500,
+                 max_dim_logsigs : int = 1000,
                  random_state : Optional[int] = None):
         
         
@@ -73,6 +121,7 @@ class GridSearchSVC:
         self.linear_svc = linear_svc
         self.max_dim_logsigs = max_dim_logsigs
 
+        # Verbosity
         if isinstance(verbose, Logger):
             self.verbose = 'logger'
             self.logger = verbose
@@ -80,9 +129,7 @@ class GridSearchSVC:
             self.verbose = verbose
             self.logger = None
 
-        self._get_param_dicts(param_grid.copy())
-
-        # CV splitter params
+        # CV setup
         self.stratified = stratified
         self.n_splits = n_splits
         self.shuffle = shuffle
@@ -92,6 +139,10 @@ class GridSearchSVC:
         self.gpu = gpu and any(d.platform == "gpu" for d in jax.devices())
         if gpu and not self.gpu:
             warnings.warn("CUDA not available; falling back to CPU.")
+
+        # Parse param grid into internal dicts
+        self._get_param_dicts(param_grid.copy())
+
 
     # ==============================================================================
     # Parameter grid preprocessing
@@ -138,7 +189,7 @@ class GridSearchSVC:
         self.n_fourier_features_list = param_grid.pop('n_fourier_features', 
                                                       _default_dict['n_fourier_features'])
 
-        self.bandwidth_list = param_grid.pop('bandwidth', _default_dict['bandwidth'])
+        self.bandwidth_ratios = param_grid.pop('bandwidth', _default_dict['bandwidth'])
 
 
         # ++++++++++++++++++++++ SVC params ++++++++++++++++++++++
@@ -190,21 +241,15 @@ class GridSearchSVC:
             raise ValueError("y must be a jnp.ndarray")
 
         if X.ndim != 3:
-            if X.ndim == 2:
-                if self.type == 'rde':
-                    raise ValueError("X must be a 3D tensor for RDE")
+            if X.ndim == 2 and self.type == "cde":
                 X = X[..., None]
             else:
-                raise ValueError("X must be a 2D or 3D tensor")
-
+                raise ValueError("X must be a 3D tensor (or 2D for CDE, which will be promoted)")
+            
         return X, y
 
 
-    def _get_feature_extractor(self, 
-                               n_features, 
-                               extractor_params, 
-                               order=None, 
-                               step=None):
+    def _get_feature_extractor(self, n_features, extractor_params, order=None, step=None):
         """
         Get the feature extractor from the parameter dictionaries.
         """
@@ -266,7 +311,6 @@ class GridSearchSVC:
         if self.linear_svc:
             svc = LinearSVC(gpu=self.gpu, **svc_params)
         else:
-            # CHANGE HERE
             svc = KernelSVC(gpu=False, **svc_params)
 
         return svc
@@ -287,9 +331,7 @@ class GridSearchSVC:
         for extractor_params in self._get_extractor_params_combinations():
 
             try:
-                
                 # start_time = time.time()
-
                 # Get the feature extractor
                 extractor = self._get_feature_extractor(n_features, 
                                                         extractor_params,
@@ -297,69 +339,90 @@ class GridSearchSVC:
                                                         step=step)
 
                 # Get the features
-                if self.linear_svc:
-                    svc_input = extractor.get_features(X, 
-                                                       batch_size=self.batch_size,
-                                                       return_interval=False,
-                                                       use_cache=True)
-                else:
-                    svc_input = extractor.get_gram(X, 
-                                                   batch_size=self.batch_size,
-                                                   return_interval=False,
-                                                   use_cache=True)
+                features = extractor.get_features(X, 
+                                                    batch_size=self.batch_size,
+                                                    return_interval=False,
+                                                    use_cache=True)
                     
                 # end_time = time.time()
-
                 # print(end_time - start_time)
 
             except Exception as e:
-                warnings.warn(f"Failed to get features for extractor_params={extractor_params}: {e}")
 
-                _params = {**sig_params, **extractor_params, **self.svc_param_grid,
-                           'normalize_feat': None, 'train_score': None}
-                
-                records.append(_params)
+                _dict = {_key : None for _key in self.svc_param_grid.keys()}
+                _params = {**sig_params, **extractor_params}
+
+                self._verbose_helper(f"Failed to get features for params={_params}", level=logging.WARNING)
+
+                results_ = {
+                    **sig_params, 
+                    **extractor_params, 
+                    **_dict,
+                    'normalize_feat': False,
+                    'cv_score': -2.0
+                }
+                records.append(results_)
                 continue
 
             for normalize_feat in self.normalize_feat_list:
+                    
+                try:
+                    
+                    if normalize_feat:        
+                        features = features / (jnp.linalg.norm(features, axis=1, keepdims=True) + EPS_)
+                    
+                    # start_time = time.time()
 
-                if normalize_feat:
-                    if self.linear_svc:   
-                        svc_input = svc_input / (jnp.linalg.norm(svc_input, axis=1, keepdims=True) + EPS_)
+                    if not self.linear_svc:
+                        svc_input = features @ features.T
                     else:
-                        _diag = jnp.sqrt(jnp.diag(svc_input) + EPS_)
-                        svc_input = svc_input / (_diag[:, None] * _diag[None, :])
+                        svc_input = features 
 
-                
-                # start_time = time.time()
+                    # Fit grid search
+                    svc = self._get_svc()
+                    svc.fit_gridsearch(svc_input, 
+                                       y, 
+                                       self.svc_param_grid, 
+                                       cv=self.n_splits, 
+                                       stratified=self.stratified)
 
-                # Fit grid search
-                svc = self._get_svc()
-                svc.fit_gridsearch(svc_input, 
-                                   y, 
-                                   self.svc_param_grid, 
-                                   cv=self.n_splits, 
-                                   stratified=self.stratified)
+                    results_ = {
+                        **sig_params,
+                        **extractor_params,
+                        **svc.best_params,
+                        'normalize_feat': normalize_feat,
+                        'cv_score': svc.best_score
+                    }
+                    records.append(results_)
 
-                results_ = {**sig_params,
-                            **extractor_params,
-                            **svc.best_params,
-                            'normalize_feat': normalize_feat,
-                            'train_score': svc.best_score}
+                    # end_time = time.time()
+                    # print('svc', end_time - start_time)
 
-                # end_time = time.time()
-                # print('svc', end_time - start_time)
+                except Exception as e:
 
-            records.append(results_)
+                    _dict = {_key : None for _key in self.svc_param_grid.keys()}
+                    _params = {**sig_params, **extractor_params}
+
+                    self._verbose_helper(f"Failed to fit SVC for params={_params}", level=logging.DEBUG)
+
+                    results_ = {**sig_params, **extractor_params, **_dict,
+                                'normalize_feat': normalize_feat,
+                                'cv_score': -1.0}
+                    
+                    records.append(results_)
+
+                    # To be removed
+                    # print(f"Failed to fit SVC for params={_params}")
+                    continue
 
         # Create DataFrame from records
         df = pd.DataFrame(records)
 
         # Get the best model based on validation score
-        if df.empty or all(df.train_score.isna()):
+        if df.empty or all(df.cv_score.isna()):
             best_model = {}
         else:
-            best_model_idx = df['train_score'].idxmax()
+            best_model_idx = df['cv_score'].idxmax()
             best_model = df.loc[best_model_idx].to_dict() 
         
         return df, best_model
@@ -376,7 +439,6 @@ class GridSearchSVC:
 
         all_dfs = []
         best_models = []
-
         self.cache = Cache()
 
         for n_fourier_feat in self.n_fourier_features_list:
@@ -419,13 +481,18 @@ class GridSearchSVC:
                     for step in self.step_list:
                         for n_feat in self.n_features_list:
 
-                            self._verbose_helper(f"  Order = {order}, Bandwidth = {bandwidth}, N_features = {n_feat}")
+                            if self.type == 'cde':
+                                self._verbose_helper(f"  Bandwidth = {bandwidth}")
+                            else:
+                                self._verbose_helper(f"  Order = {order}, Step = {step}, Bandwidth = {bandwidth}")
 
-                            sig_params = {'n_fourier_features': n_fourier_feat,
-                                          'bandwidth': bandwidth,
-                                          'n_features': n_feat,
-                                          'order': order,
-                                          'step': step}
+                            sig_params = {
+                                'n_fourier_features': n_fourier_feat,
+                                'bandwidth': bandwidth,
+                                'n_features': n_feat,
+                                'order': order,
+                                'step': step
+                            }
 
                             df, best = self.evaluate_extractor_svc(X_rff, y, sig_params)
 
@@ -434,7 +501,7 @@ class GridSearchSVC:
 
         df_all_results = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
         df_best_models = pd.DataFrame(best_models) if best_models else pd.DataFrame()
-        df_best_models.dropna(axis=0, subset='train_score', inplace=True)
+        df_best_models.dropna(axis=0, subset='cv_score', inplace=True)
 
         return df_all_results, df_best_models
 
@@ -449,6 +516,7 @@ class GridSearchSVC:
         
         self.cache = Cache()
 
+        train_scores = []
         test_scores = []
 
         for _, row in df_best_models.iterrows():
@@ -498,8 +566,10 @@ class GridSearchSVC:
                 X_rff = X_transformed
                 X_rff_test = X_test_transformed
 
-            X_rff = X_rff / X_rff.max()
-            X_rff_test = X_rff_test / X_rff.max()
+            # Normalize the random Fourier features
+            _max = X_rff.max()
+            X_rff = X_rff / _max
+            X_rff_test = X_rff_test / _max
 
             # Apply the feature extractor
             extractor = self._get_feature_extractor(n_features, 
@@ -507,32 +577,45 @@ class GridSearchSVC:
                                                     order=order,
                                                     step=step)
 
-            X_feat_train = extractor.get_features(X_rff,
+            features_train = extractor.get_features(X_rff,
                                                   batch_size=self.batch_size,
                                                   return_interval=False,
                                                   use_cache=True)
-            X_feat_test = extractor.get_features(X_rff_test,
-                                                 batch_size=self.batch_size,
-                                                 return_interval=False,
-                                                 use_cache=True)
+            
+            if self.type == 'cde':
+                features_test = extractor.get_features(X_rff_test,
+                                                       batch_size=self.batch_size,
+                                                       return_interval=False,
+                                                       use_cache=True)
+            else:
+                features_test = extractor.get_features(X_rff_test,
+                                                       batch_size=self.batch_size,
+                                                       return_interval=False,
+                                                       use_cache=True,
+                                                       testing=True)
 
             if normalize_feat:
-                X_feat_train = X_feat_train / (jnp.linalg.norm(X_feat_train, axis=1, keepdims=True) + EPS_)
-                X_feat_test = X_feat_test / (jnp.linalg.norm(X_feat_test, axis=1, keepdims=True) + EPS_)
+                features_train = features_train / (jnp.linalg.norm(features_train, axis=1, keepdims=True) + EPS_)
+                features_test = features_test / (jnp.linalg.norm(features_test, axis=1, keepdims=True) + EPS_)
+
 
             if not self.linear_svc:
-                svc_input_train = X_feat_train @ X_feat_train.T
-                svc_input_test = X_feat_test @ X_feat_train.T
+                svc_input_train = features_train @ features_train.T
+                svc_input_test = features_test @ features_train.T
             else:
-                svc_input_train = X_feat_train
-                svc_input_test = X_feat_test
+                svc_input_train = features_train
+                svc_input_test = features_test
 
             # Fit svc
             svc = self._get_svc(svc_params)
             svc.fit(svc_input_train, y)
+            train_score = svc.score(svc_input_train, y)
             test_score = svc.score(svc_input_test, y_test)
+
+            train_scores.append(train_score)
             test_scores.append(test_score)
 
+        df_best_models['train_score'] = train_scores
         df_best_models['test_score'] = test_scores
 
         return df_best_models
@@ -581,6 +664,11 @@ class GridSearchSVC:
         self._verbose_helper("Starting grid search...")
         _pre_paramgrid_size = len(ParameterGrid(self.pre_param_grid))
 
+        # Update bandwidth - TO BE CHANGED
+        suggested_bandwidth = suggest_bandwidth(X)
+        _bandwidth_list = [suggested_bandwidth * br for br in self.bandwidth_ratios]
+        self.bandwidth_list = _bandwidth_list + [1.0, 1.25, 0.75]
+
         # Grid search over preprocessing parameters
         for i, pre_params in enumerate(ParameterGrid(self.pre_param_grid)):
 
@@ -589,11 +677,6 @@ class GridSearchSVC:
             # Preprocessing
             preprocessing_class = Preprocessor(**pre_params)
             X_transformed = preprocessing_class.fit_transform(X)
-
-            # Update bandwidth - TO BE CHANGED
-            suggested_bandwidth = suggest_bandwidth(X_transformed)
-            _bandwidth_list = [suggested_bandwidth * br for br in self.bandwidth_list]
-            self.bandwidth_list = _bandwidth_list + [1.0, 1.25, 0.75]
 
             # Fit model
             df_all_results, df_best_models = self._fit(X_transformed, y)
@@ -614,14 +697,14 @@ class GridSearchSVC:
             'lead_lag'
         ]
 
-        idx = df_best_models.groupby(params_to_filter, dropna=False)['train_score'].idxmax()
+        idx = df_best_models.groupby(params_to_filter, dropna=False)['cv_score'].idxmax()
         df_best_models = df_best_models.loc[idx.values].reset_index(drop=True)
 
         if testing:
             df_best_models = self._test(X, y, X_test, y_test, df_best_models)
 
         _mask = (df_best_models.nunique(dropna=False) > 1)
-        _mask.loc[['train_score', 'test_score', 'activation']] = True
+        _mask.loc[['train_score', 'cv_score', 'test_score', 'activation', 'stdA', 'stdB', 'std0']] = True
         df_best_models = df_best_models.loc[:, _mask]
         df_best_models.reset_index(drop=True, inplace=True)
 

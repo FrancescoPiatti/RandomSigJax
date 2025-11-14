@@ -1,3 +1,5 @@
+# src/utils/lie_algebra.py
+
 import jax
 import jax.numpy as jnp
 

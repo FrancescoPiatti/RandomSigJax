@@ -1,6 +1,12 @@
 import jax
 import jax.numpy as jnp
 
+try:
+    from cuml.svm import SVC as SVConGPU
+    cuml_available = True
+except Exception:
+    cuml_available = False
+
 from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import StratifiedKFold
@@ -8,6 +14,8 @@ from sklearn.model_selection import KFold
 
 from typing import Optional
 from typing import Dict
+
+import warnings
 
 
 class KernelSVC:
@@ -18,13 +26,18 @@ class KernelSVC:
                  gpu : bool = False,
                  C : float = 1.0,
                  gamma : str = 'scale',
+                 kernel : str = 'precomputed',
                  decision_function_shape : Optional[str] = 'ovo',
                  max_iter : int = 1000,
                  tol :  Optional[float] = None,
                  dual : Optional[float] = None,
                  random_state: int = None):
 
-        # ON GPU CUML DOES NOT SUPPORT PRECOMPUTED KERNELS
+        # Check GPU is available and cuml is installed
+        if gpu and any(d.platform == "gpu" for d in jax.devices()) and cuml_available:
+            gpu = True
+        else:
+            gpu = False
 
         self.hparams = {}
 
@@ -43,11 +56,18 @@ class KernelSVC:
         if random_state is not None:
             self.hparams['random_state'] = random_state
 
-        # if not self.gpu:
-        #     self.hparams['kernel'] = 'precomputed'  # Set kernel to precomputed for SVC
-
         # Initialize the model
-        self.model = SVC(kernel='precomputed', **self.hparams)
+
+        if gpu:
+            if kernel == 'precomputed':
+                warnings.warn("Precomputed kernel is not supported on GPU. Switching to CPU implementation.")
+                self.model = SVC(kernel='precomputed', **self.hparams)
+
+            else:
+                self.model = SVConGPU(kernel=kernel, **self.hparams)
+        else:
+            self.model = SVC(kernel=kernel, **self.hparams)
+
 
     # ----------------------------- Validation methods ----------------------------- 
     
@@ -78,7 +98,7 @@ class KernelSVC:
         self.model.fit(gram_matrix, y)
 
     def fit_gridsearch(self,
-                       features: jnp.ndarray,
+                       gram_matrix: jnp.ndarray,
                        y: jnp.ndarray,
                        svc_grid : Dict,
                        cv : int = 4,
@@ -87,14 +107,13 @@ class KernelSVC:
         Fit the model using grid search.
         """
 
-        self._validate_input_type(features, y)
+        self._validate_input_type(gram_matrix, y)
 
         # Set up folds
-        splits = min(cv, jnp.min(jnp.bincount(y)).item())
-        self.kfold = StratifiedKFold(n_splits=splits) if stratified else KFold(n_splits=splits)
+        self.kfold = StratifiedKFold(n_splits=cv) if stratified else KFold(n_splits=cv)
 
         self.model = GridSearchCV(self.model, svc_grid, cv=self.kfold)
-        self.model.fit(features, y)
+        self.model.fit(gram_matrix, y)
 
     def predict(self, gram_matrix: jnp.ndarray) -> jnp.ndarray:
         """
@@ -110,6 +129,9 @@ class KernelSVC:
         """
         self._validate_input_type(gram_matrix, y)
         return self.model.score(gram_matrix, y)
+    
+    
+    # ----------------------------- Properties -----------------------------
     
     @property
     def coef_(self) -> jnp.ndarray:

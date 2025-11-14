@@ -1,3 +1,5 @@
+# src/utils/checks.py
+
 from numbers import Number
 
 def _check_positive_value(scalar: Number, name: str) -> Number:

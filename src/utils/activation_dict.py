@@ -1,3 +1,5 @@
+# src/utils/activation_dict.py
+
 import jax.nn as nn
 
 ACTIVATION_DICT = {

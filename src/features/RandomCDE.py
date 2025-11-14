@@ -7,6 +7,7 @@ from typing import Union
 from typing import Callable
 
 from dataclasses import dataclass
+import warnings
 
 from ..utils.checks import _check_positive_integer_value, _check_non_negative_value
 from ..utils.random import KeyGen, gaussian_matrices_sampler_CDE, scale_matrices_cde
@@ -37,7 +38,7 @@ class VectorFieldCDE:
     activation: Callable
     matrices: jnp.ndarray
 
-    # Build from random init (preferred)
+    # Build from random init 
     @classmethod
     def from_random(cls,
                     input_dim : int,
@@ -46,6 +47,9 @@ class VectorFieldCDE:
                     activation : Callable,
                     stdA : float = 1.0,
                     stdB : float = 1.0):
+        """
+        Creates the vector fields from random initialization.
+        """
 
         matrices = gaussian_matrices_sampler_CDE(key, n_features, input_dim, stdA, stdB)
 
@@ -66,7 +70,7 @@ class VectorFieldCDE:
                    stdA : float = 1.0,
                    stdB : float = 1.0):
         """
-        Creates the vector fileds from the cache
+        Creates the vector fields from cache.
         """
 
         # Expected cache keys: 'matrices', 'stdA', 'stdB'
@@ -78,61 +82,16 @@ class VectorFieldCDE:
                    n_features=n_features,
                    activation=activation,
                    matrices=mats_scaled)
-
-    # @staticmethod
-    # @partial(jax.jit, static_argnames=('activation'))
-    # def apply(z, activation, A, b, dx):
-    #     return jnp.einsum('dnm, d -> nm', A, dx) @ activation(z) + jnp.einsum('dn,d->n', b, dx)
-
-
-
-# def cdeint(field, X, features_0):
-#     """
-#     Computes the path solving the CDE
-#         dY_t = \sum_{i=1}^d ( A_i@activation(Y_t) + b_i )*dx^i_t
-#     with initial value Y_0
-
-#     :param activation: (1) -> (1)
-#     :param AA: (d, N, N)
-#     :param bb: (N, d)
-#     :param dx: (times, d)
-#     :param Y_0: (N,)
-#     :return: Y : (times, N) 
-#     """
-
-#     @partial(jax.jit, static_argnames=('act'))
-#     def _integrate(act, A, b, z_0, dx):
-
-#         times = dx.shape[0] + 1
-#         z_t = jnp.zeros(shape=(times, A.shape[1])).at[0,:].set(z_0)
-
-#         def body_fun(t, array):
-#             return array.at[t+1, :].set(array[t] + field.apply(array[t], act, A, b, dx[t]))
-
-#         return jax.lax.fori_loop(0, times-1, body_fun, z_t)
     
-#     @partial(jax.jit, static_argnames=('act'))
-#     def _integrate_all(act, A, b, z_0, dx):
-
-#         dx = jnp.diff(X, axis=1)
-
-#         features = jax.vmap(lambda dx_i : _integrate(act, A, b, z_0, dx_i), in_axes=0)(dx)
-
-#         return features
-
-#     features = _integrate_all(field.activation, 
-#                               field.matrices[..., :-1], 
-#                               field.matrices[..., -1], 
-#                               features_0, 
-#                               X)
-
-#     return features
 
 def cdeint(field, X, features_0, return_interval: bool = True):
     """
     Solve dZ_t = sum_i (A_i @ act(Z_t) + b_i) dX_t^i, with Z_0 = features_0.
-    X: (B, T, d), features_0: (B, n)
-    field.matrices: (d, n, n+1) with last col = b_i
+    
+    Args:
+        field: VectorFieldCDE object defining the vector field.
+        X: jnp.ndarray of shape (B, T, d) input paths.
+        features_0: jnp.ndarray of shape (B, n) initial features.
 
     If return_interval:
         returns (B, T, n) full trajectory.
@@ -145,10 +104,11 @@ def cdeint(field, X, features_0, return_interval: bool = True):
     act = field.activation            # capture in closure (no static arg)
     dx = jnp.diff(X, axis=1)          # (B, T-1, d)
 
+
     @jax.jit
     def _integrate_one_full(A, b, z0, dx_seq):
         """
-        Single trajectory, returns full path (T, n).
+        Single trajectory integration, returns full path (T, n).
         """
         # Precompute per-step operators
         mat_dx = jnp.einsum('td,dnm->tnm', dx_seq, A)  # (T-1, n, n)
@@ -162,10 +122,11 @@ def cdeint(field, X, features_0, return_interval: bool = True):
         _, traj = jax.lax.scan(step, z0, (mat_dx, bias_dx))   # traj: (T-1, n)
         return jnp.concatenate([z0[None, :], traj], axis=0)   # (T, n)
 
+
     @jax.jit
     def _integrate_one_final(A, b, z0, dx_seq):
         """
-        Single trajectory, returns only final state (n,).
+        Single trajectory integration, returns only final state (n,).
         Memory-saving: compute M_t, b_t on the fly; no per-step storage.
         """
         def step(z_t, x_t):  # x_t: (d,)
@@ -192,11 +153,11 @@ class RandomCDE:
     This class defines the RandomCDE model, which is a neural CDE with random matrices.
 
     Args:
+        key (int or jax.Array): Random key or seed for reproducibility.
         n_features (int): Number of features in the CDE.
         activation (Callable or str): Activation function to apply to the CDE features.
         config (dict): Configuration dictionary with parameters for the CDE.
         cache (Optional[Cache]): Cache object to store precomputed matrices and features.
-        device (torch.device): Device to run the model on (default is 'cpu').
     """
 
     def __init__(self,
@@ -223,9 +184,9 @@ class RandomCDE:
 
     # ----------------------------- Validation methods ----------------------------- 
 
-    def _validate_input(self, X : jnp.ndarray) -> None:
+    def _validate_input(self, X : jnp.ndarray) -> jnp.ndarray:
         """
-        Validates the input data. Moves it to self device
+        Validates the input data.
 
         Raises:
             ValueError: If the input data is not a jnp.ndarray, or if the input data is not 2D or 3D.
@@ -241,7 +202,7 @@ class RandomCDE:
             raise ValueError("Input data must be either 2D or 3D (batch)")
 
 
-    def _validate_params(self):
+    def _validate_params(self) -> None:
 
         _check_positive_integer_value(self.n_features, 'n_features')
         _check_non_negative_value(self.std0, 'std0')
@@ -261,10 +222,7 @@ class RandomCDE:
 
     def _validate_cache(self, input_dim : int) -> bool:
         """
-        Validates the fourier_matrices in Cache.
-
-        Args:
-            input_dim (int).
+        Validates the fourier_matrices and the features_0 in Cache.
         """
 
         if self.cache is None:
@@ -327,6 +285,15 @@ class RandomCDE:
         self.cache = cache
     
 
+    def clear_cache(self, key : Optional[str] = None) -> None:
+        """
+        Clears the cache object.
+        """    
+        if key is None:
+            self.cache.clear()
+        else:
+            self.cache.remove(key)
+
     # ----------------------------- Main methods ----------------------------- 
     
     def _initialize_fields(self, input_dim, use_cache) -> None:
@@ -383,17 +350,17 @@ class RandomCDE:
 
     def _get_features(self, 
                       X : jnp.ndarray, 
-                      return_interval : bool = False):
+                      return_interval : bool = False) -> jnp.ndarray:
         
         """
         Compute the CDE feature for a single batch of paths.
 
         Args:
-            X (Tensor): Input of shape (batch, timesteps, input_channels).
+            X (jnp.ndarray): Input of shape (batch, timesteps, input_channels).
             return_interval (bool): If True, returns the entire feature path over time;
 
         Returns:
-            Tensor:
+            jnp.ndarray:
               - If `return_interval`: shape (batch, timesteps, n_features).
               - Else: shape (batch, n_features), the final timepoint features.
         """
@@ -407,9 +374,24 @@ class RandomCDE:
                      X : jnp.ndarray, 
                      batch_size : Optional[int] = None,
                      return_interval : bool = False,
-                     use_cache : bool = False):
+                     use_cache : bool = False) -> jnp.ndarray:
         
-        # Ensure input tensor is valid
+        """
+        Compute the CDE features for a collection of paths X.
+        
+        Args:
+            X: jnp.ndarray of shape (batch, time, input_dim).
+            batch_size: Optional minibatch size for feature computation.
+            return_interval: If True, computes features for all timepoints.
+            use_cache: Whether to use cached coefficient matrices.
+        
+        Returns:
+            jnp.ndarray:
+                - If return_interval: shape (batch, time, n_features).
+                - Else: shape (batch, n_features).
+        """
+
+        # Ensure input array is valid
         X = self._validate_input(X)
 
         # Sizes
@@ -449,10 +431,8 @@ class RandomCDE:
         Args:
             X: jnp.ndarray of shape (batchX, timeX, input_dim).
             Y: Optional[jnp.ndarray] of shape (batchY, timeY, input_dim).
-            If None, defaults to X.
-            return_interval: If True, computes kernel for all timepoints:
-                returns shape (batchX, batchY, timeX, timeY).
-                Otherwise returns shape (batchX, batchY).
+               If None, defaults to X.
+            return_interval: If True, computes kernel for all timepoints.
             batch_size: Optional minibatch size for feature computation.
             use_cache: Whether to use cached coefficient matrices.
 
@@ -469,6 +449,12 @@ class RandomCDE:
                                     use_cache=use_cache)
 
         if Y is not None:
+
+            if not use_cache:
+                warnings.warn("When computing Gram between different datasets, "
+                              "it is recommended to use_cache=True to ensure consistent CDE parameters.",
+                              UserWarning)
+
             feats_Y = self.get_features(Y, 
                                         batch_size=batch_size,
                                         return_interval=return_interval,

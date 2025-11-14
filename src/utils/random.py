@@ -1,3 +1,5 @@
+# src/utils/random.py
+
 import jax
 import jax.numpy as jnp
 import jax.random as random
@@ -10,6 +12,7 @@ from typing import Union
 
 from .lie_algebra import get_lie_matrices
 from .lie_algebra import get_lyndon_words
+
 
 @dataclass
 class KeyGen:
@@ -105,6 +108,7 @@ def uniform_vector_sampler(key: jax.Array, N: int) -> jnp.ndarray:
     """
     return random.uniform(key, shape=(N,), dtype=jnp.float32)
 
+
 # =============================================================================
 # Gaussian matrix sampler
 # =============================================================================
@@ -177,6 +181,7 @@ def gaussian_matrices_sampler_RDE(key : jax.Array,
     bias = gaussian_vectors_sampler(key2, N, lie_matrices.shape[0], stdB)
 
     return jnp.concatenate([lie_matrices, bias], axis=-1)
+
 
 # =============================================================================
 # Gaussian matrix scaler
